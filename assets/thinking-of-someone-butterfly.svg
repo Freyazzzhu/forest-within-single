@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 300" role="img" aria-label="Thinking of someone blue butterfly">
+  <defs>
+    <linearGradient id="wingBlue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2446ff" />
+      <stop offset="34%" stop-color="#00a7ff" />
+      <stop offset="58%" stop-color="#72f0dc" />
+      <stop offset="78%" stop-color="#b8dcff" />
+      <stop offset="100%" stop-color="#6f86ff" />
+    </linearGradient>
+    <linearGradient id="bodyBlue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#b8dcff" />
+      <stop offset="46%" stop-color="#123b8c" />
+      <stop offset="100%" stop-color="#6f86ff" />
+    </linearGradient>
+    <style>
+      .svg-wing {
+        transform-box: fill-box;
+        transform-style: preserve-3d;
+      }
+
+      .svg-wing-left {
+        animation: wingLeft 880ms ease-in-out infinite alternate;
+        transform-origin: 100% 50%;
+      }
+
+      .svg-wing-right {
+        animation: wingRight 880ms ease-in-out infinite alternate;
+        transform-origin: 0% 50%;
+      }
+
+      .wing-fill {
+        fill: url(#wingBlue);
+        opacity: 0.9;
+        stroke: rgba(61, 51, 42, 0.08);
+        stroke-width: 1.2;
+      }
+
+      .wing-fill.lower {
+        opacity: 0.78;
+      }
+
+      .wing-vein {
+        fill: none;
+        opacity: 0.68;
+        stroke: rgba(250, 246, 238, 0.92);
+        stroke-linecap: round;
+        stroke-width: 2.6;
+      }
+
+      .wing-dot {
+        fill: rgba(250, 246, 238, 0.92);
+        stroke: rgba(61, 51, 42, 0.25);
+        stroke-width: 1;
+      }
+
+      .svg-body ellipse,
+      .svg-body path:not(.antenna) {
+        fill: url(#bodyBlue);
+        stroke: rgba(61, 51, 42, 0.08);
+        stroke-width: 1;
+      }
+
+      .antenna {
+        fill: none;
+        stroke: #8fa3a8;
+        stroke-linecap: round;
+        stroke-width: 2.2;
+      }
+
+      @keyframes wingLeft {
+        from { transform: rotateY(0deg); }
+        to { transform: rotateY(52deg); }
+      }
+
+      @keyframes wingRight {
+        from { transform: rotateY(0deg); }
+        to { transform: rotateY(-52deg); }
+      }
+    </style>
+  </defs>
+  <g class="svg-wing svg-wing-left" id="left-wing">
+    <path class="wing-fill" d="M176 136C116 34 42 24 18 39C50 78 22 116 57 154C91 191 137 164 176 146Z" />
+    <path class="wing-fill lower" d="M176 153C126 170 63 158 49 213C67 249 110 286 147 279C154 231 170 190 181 156Z" />
+    <path class="wing-vein" d="M176 144C132 116 91 72 38 43M169 151C118 152 83 167 55 210M167 143C135 130 111 124 82 132M158 164C127 190 110 222 96 262" />
+    <circle class="wing-dot" cx="48" cy="54" r="5" />
+    <circle class="wing-dot" cx="47" cy="90" r="6" />
+    <circle class="wing-dot" cx="75" cy="260" r="5" />
+  </g>
+  <g class="svg-wing svg-wing-right" id="right-wing">
+    <path class="wing-fill" d="M184 136C244 34 318 24 342 39C310 78 338 116 303 154C269 191 223 164 184 146Z" />
+    <path class="wing-fill lower" d="M184 153C234 170 297 158 311 213C293 249 250 286 213 279C206 231 190 190 179 156Z" />
+    <path class="wing-vein" d="M184 144C228 116 269 72 322 43M191 151C242 152 277 167 305 210M193 143C225 130 249 124 278 132M202 164C233 190 250 222 264 262" />
+    <circle class="wing-dot" cx="312" cy="54" r="5" />
+    <circle class="wing-dot" cx="313" cy="90" r="6" />
+    <circle class="wing-dot" cx="285" cy="260" r="5" />
+  </g>
+  <g class="svg-body" id="body">
+    <path class="antenna" d="M174 103C154 58 133 58 129 80M186 103C206 58 227 58 231 80" />
+    <ellipse cx="180" cy="124" rx="11" ry="14" />
+    <ellipse cx="180" cy="161" rx="13" ry="34" />
+    <path d="M171 193C176 219 184 219 189 193Z" />
+  </g>
+</svg>
