@@ -8,6 +8,7 @@
   <style>
     :root {
       color-scheme: dark;
+      --butterfly-size: clamp(24px, 2.75vw, 48px);
     }
 
     * {
@@ -20,7 +21,9 @@
       height: 100%;
       margin: 0;
       overflow: hidden;
-      background: #020202;
+      background: #030303;
+      cursor: none;
+      touch-action: none;
     }
 
     body {
@@ -35,17 +38,37 @@
       display: block;
     }
 
+      #butterfly {
+        position: fixed;
+      left: 0;
+      top: 0;
+      width: var(--butterfly-size);
+      height: var(--butterfly-size);
+      object-fit: contain;
+      pointer-events: none;
+        opacity: 0;
+        visibility: hidden;
+      transform: translate3d(-50%, -50%, 0);
+      transform-origin: 50% 50%;
+      filter:
+        drop-shadow(0 0 4px rgba(255, 236, 170, 0.65))
+        drop-shadow(0 0 9px rgba(102, 210, 255, 0.34));
+      transition: opacity 420ms ease;
+      will-change: transform, opacity;
+      z-index: 3;
+    }
+
     #loading {
       position: fixed;
       inset: 0;
       display: grid;
       place-items: center;
-      color: rgba(255, 255, 255, 0.72);
-      font-size: clamp(15px, 1.35vw, 21px);
+      color: rgba(255, 255, 255, 0.74);
+      font-size: clamp(15px, 1.4vw, 22px);
       letter-spacing: 0;
-      background: #020202;
-      z-index: 2;
-      transition: opacity 420ms ease, visibility 420ms ease;
+      background: #030303;
+      z-index: 4;
+      transition: opacity 300ms ease, visibility 300ms ease;
     }
 
     #loading.is-hidden {
@@ -55,199 +78,501 @@
   </style>
 </head>
 <body>
-  <canvas id="scene" tabindex="0" autofocus aria-label="Forest projection mapped onto the room screen"></canvas>
+  <canvas id="scene" aria-label="Immersive projection gallery with interactive forest colour reveal"></canvas>
+  <img id="butterfly" src="assets/thinking-of-someone-butterfly.svg" alt="Blue butterfly">
   <div id="loading">Loading forest...</div>
 
+  <script src="assets/vendor/three.min.js"></script>
   <script src="assets/vendor/embedded-assets.js"></script>
   <script>
     (() => {
       const canvas = document.getElementById("scene");
-      const ctx = canvas.getContext("2d");
       const loadingEl = document.getElementById("loading");
-      canvas.tabIndex = 0;
-      document.body.tabIndex = -1;
+
+      const renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: true,
+        alpha: false,
+        powerPreference: "high-performance"
+      });
+      renderer.setClearColor(0x030303, 1);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      if ("outputColorSpace" in renderer && "SRGBColorSpace" in THREE) {
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+      } else {
+        renderer.outputEncoding = THREE.sRGBEncoding;
+      }
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.82;
+
+      const scene = new THREE.Scene();
+      scene.fog = new THREE.Fog(0x030303, 7.5, 18);
+
+      const camera = new THREE.PerspectiveCamera(58, 1, 0.05, 60);
+      camera.position.set(0, 1.6, 4.35);
+
+      const galleryRig = new THREE.Group();
+      scene.add(galleryRig);
 
       const projectionCanvas = document.createElement("canvas");
-      const projectionCtx = projectionCanvas.getContext("2d");
-      const revealMaskCanvas = document.createElement("canvas");
-      const revealMaskCtx = revealMaskCanvas.getContext("2d");
-      const colorLayerCanvas = document.createElement("canvas");
-      const colorLayerCtx = colorLayerCanvas.getContext("2d");
+      const projectionCtx = projectionCanvas.getContext("2d", { alpha: false });
+      const maskCanvas = document.createElement("canvas");
+      const maskCtx = maskCanvas.getContext("2d");
+      const permanentMaskCanvas = document.createElement("canvas");
+      const permanentMaskCtx = permanentMaskCanvas.getContext("2d");
+      const colorCanvas = document.createElement("canvas");
+      const colorCtx = colorCanvas.getContext("2d");
 
-      const ROOM_WIDTH = 1672;
-      const ROOM_HEIGHT = 941;
-      const PROJECTION_WIDTH = 1800;
-      const PROJECTION_HEIGHT = 900;
-      const CURVE_LEFT = -82;
-      const CURVE_RIGHT = 1754;
+      const projectionTexture = new THREE.CanvasTexture(projectionCanvas);
+      if ("colorSpace" in projectionTexture && "SRGBColorSpace" in THREE) {
+        projectionTexture.colorSpace = THREE.SRGBColorSpace;
+      } else {
+        projectionTexture.encoding = THREE.sRGBEncoding;
+      }
+      projectionTexture.wrapS = THREE.ClampToEdgeWrapping;
+      projectionTexture.wrapT = THREE.ClampToEdgeWrapping;
+      projectionTexture.minFilter = THREE.LinearFilter;
+      projectionTexture.magFilter = THREE.LinearFilter;
 
+      const WALL_RADIUS = 5.25;
+      const WALL_ARC_START = THREE.MathUtils.degToRad(-100);
+      const WALL_ARC_LENGTH = THREE.MathUtils.degToRad(200);
+      const WALL_Z_OFFSET = 0.2;
+      const WALL_X_SCALE = 0.94;
+
+      const raycaster = new THREE.Raycaster();
+      const pointerNdc = new THREE.Vector2();
       const images = {};
-      const canopyLightBands = createCanopyLightBands();
-      const fogSheets = createFogSheets();
-      const waterStreaks = createWaterStreaks();
-      const permanentGlows = [];
-      const doorZones = [
-        { x: 0.205, y: 0.555, rx: 0.075, ry: 0.12 },
-        { x: 0.431, y: 0.555, rx: 0.07, ry: 0.12 },
-        { x: 0.787, y: 0.555, rx: 0.075, ry: 0.12 }
-      ];
+
       const pointer = {
-        x: PROJECTION_WIDTH * 0.5,
-        y: PROJECTION_HEIGHT * 0.55,
+        x: 1024,
+        y: 576,
         active: false
       };
-      const butterfly = createButterfly(PROJECTION_WIDTH * 0.52, PROJECTION_HEIGHT * 0.55);
-      const blueState = createButterflyState();
 
+      const butterfly = {
+        x: pointer.x,
+        y: pointer.y,
+        lastX: pointer.x,
+        lastY: pointer.y,
+        angle: 0,
+        opacity: 1,
+        scale: 1
+      };
+
+      const look = {
+        targetYaw: 0,
+        targetPitch: 0,
+        yaw: 0,
+        pitch: 0,
+        dragging: false,
+        lastX: 0,
+        lastY: 0
+      };
+      const viewer = {
+        x: 0,
+        z: 4.35,
+        targetX: 0,
+        targetZ: 4.35
+      };
+
+      const particles = [];
+      const doorZones = [
+        { x: 0.205, y: 0.555, rx: 0.105, ry: 0.18 },
+        { x: 0.432, y: 0.555, rx: 0.095, ry: 0.17 },
+        { x: 0.787, y: 0.555, rx: 0.1, ry: 0.18 }
+      ];
+
+      let mode = "follow";
+      let hoverDoor = null;
+      let hoverSeconds = 0;
+      let flight = null;
       let width = 0;
       let height = 0;
       let dpr = 1;
-      let baseRoomRect = { x: 0, y: 0, w: 0, h: 0 };
-      let roomRect = { x: 0, y: 0, w: 0, h: 0 };
-      let forestRect = { x: 0, y: 0, w: PROJECTION_WIDTH, h: PROJECTION_HEIGHT };
+      let projectionWidth = 0;
+      let projectionHeight = 0;
+      let coverRect = { x: 0, y: 0, w: 0, h: 0 };
+      let projectionWall = null;
       let previousTime = performance.now();
       const pressedKeys = new Set();
-      const viewer = {
-        depth: 0,
-        targetDepth: 0,
-        pan: 0,
-        targetPan: 0,
-        lift: 0,
-        targetLift: 0
-      };
 
       Promise.all([
-        loadImage("assets/room.png"),
-        loadImage(window.FOREST_WITHIN_EMBEDDED_ASSETS.bg || "assets/forest-bg.png"),
-        loadImage(window.FOREST_WITHIN_EMBEDDED_ASSETS.color || "assets/forest-color.png"),
-        loadImage("assets/thinking-of-someone-butterfly.svg")
-      ]).then(([room, forest, colorForest, blueButterfly]) => {
-        images.room = room;
-        images.forest = forest;
-        images.colorForest = colorForest;
-        images.blueButterfly = blueButterfly;
+        loadImage(window.FOREST_WITHIN_EMBEDDED_ASSETS.bg),
+        loadImage(window.FOREST_WITHIN_EMBEDDED_ASSETS.color),
+        loadImage(window.FOREST_WITHIN_EMBEDDED_ASSETS.butterfly)
+      ]).then(([bg, color, butterflyImage]) => {
+        images.bg = bg;
+        images.color = color;
+        images.butterfly = butterflyImage;
+
+        buildGallery();
         resize();
         loadingEl.classList.add("is-hidden");
-        focusScene();
+        butterfly.opacity = 1;
         requestAnimationFrame(render);
       });
 
       window.addEventListener("resize", resize);
       window.addEventListener("pointermove", updatePointer, { passive: true });
-      window.addEventListener("pointerdown", focusScene, { passive: true });
+      window.addEventListener("pointerdown", startPointer, { passive: true });
+      window.addEventListener("pointerup", stopPointer, { passive: true });
+      window.addEventListener("pointercancel", stopPointer, { passive: true });
       window.addEventListener("touchmove", updateTouch, { passive: false });
       window.addEventListener("touchstart", updateTouch, { passive: false });
-      document.addEventListener("keydown", handleKeyDown, true);
-      document.addEventListener("keyup", handleKeyUp, true);
-      window.addEventListener("focus", focusScene);
+      window.addEventListener("keydown", handleKeyDown);
+      window.addEventListener("keyup", handleKeyUp);
       window.addEventListener("blur", () => pressedKeys.clear());
 
+      function buildGallery() {
+        scene.add(new THREE.HemisphereLight(0x202026, 0x050505, 0.38));
+
+        const floor = new THREE.Mesh(
+          new THREE.PlaneGeometry(15, 13),
+          new THREE.MeshStandardMaterial({
+            color: 0x080808,
+            roughness: 0.72,
+            metalness: 0.08
+          })
+        );
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.set(0, 0, -1.5);
+        floor.receiveShadow = true;
+        galleryRig.add(floor);
+
+        const ceiling = new THREE.Mesh(
+          new THREE.PlaneGeometry(15, 13),
+          new THREE.MeshStandardMaterial({
+            color: 0x020202,
+            roughness: 0.9
+          })
+        );
+        ceiling.rotation.x = Math.PI / 2;
+        ceiling.position.set(0, 3.6, -1.5);
+        galleryRig.add(ceiling);
+
+        const backWall = new THREE.Mesh(
+          new THREE.PlaneGeometry(15, 3.6),
+          new THREE.MeshStandardMaterial({ color: 0x020202, roughness: 0.88 })
+        );
+        backWall.position.set(0, 1.8, 5.05);
+        galleryRig.add(backWall);
+
+        const sideMaterial = new THREE.MeshStandardMaterial({ color: 0x030303, roughness: 0.86 });
+        const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(9.5, 3.6), sideMaterial);
+        leftWall.position.set(-7.5, 1.8, 0.35);
+        leftWall.rotation.y = Math.PI / 2;
+        galleryRig.add(leftWall);
+
+        const rightWall = new THREE.Mesh(new THREE.PlaneGeometry(9.5, 3.6), sideMaterial);
+        rightWall.position.set(7.5, 1.8, 0.35);
+        rightWall.rotation.y = -Math.PI / 2;
+        galleryRig.add(rightWall);
+
+        const floorSpill = new THREE.Mesh(
+          new THREE.PlaneGeometry(8.6, 2.25),
+          new THREE.MeshBasicMaterial({
+            map: projectionTexture,
+            transparent: true,
+            opacity: 0.14,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+          })
+        );
+        floorSpill.rotation.x = -Math.PI / 2;
+        floorSpill.position.set(0, 0.018, -1.85);
+        galleryRig.add(floorSpill);
+
+        const wallGeometry = createCurvedWallGeometry(WALL_RADIUS, 3.05, 128);
+        const projectionMaterial = new THREE.MeshBasicMaterial({
+          map: projectionTexture,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.96
+        });
+        projectionWall = new THREE.Mesh(wallGeometry, projectionMaterial);
+        projectionWall.position.set(0, 0.22, 0);
+        galleryRig.add(projectionWall);
+
+        const glowWall = new THREE.Mesh(
+          createCurvedWallGeometry(WALL_RADIUS - 0.03, 3.12, 128),
+          new THREE.MeshBasicMaterial({
+            map: projectionTexture,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: 0.12,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+          })
+        );
+        glowWall.position.copy(projectionWall.position);
+        galleryRig.add(glowWall);
+
+        addPanelLines();
+        addStandingCircle();
+        addProjectors();
+        addTrackLights();
+        addMinimalBenches();
+      }
+
+      function createCurvedWallGeometry(radius, wallHeight, segments) {
+        const positions = [];
+        const uvs = [];
+        const indices = [];
+
+        for (let i = 0; i <= segments; i += 1) {
+          const u = i / segments;
+          const angle = WALL_ARC_START + WALL_ARC_LENGTH * u;
+          const x = Math.sin(angle) * radius * WALL_X_SCALE;
+          const z = -Math.cos(angle) * radius + WALL_Z_OFFSET;
+
+          positions.push(x, 0, z, x, wallHeight, z);
+          uvs.push(u, 0, u, 1);
+        }
+
+        for (let i = 0; i < segments; i += 1) {
+          const a = i * 2;
+          const b = a + 1;
+          const c = a + 2;
+          const d = a + 3;
+          indices.push(a, c, b, c, d, b);
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geometry.setIndex(indices);
+        geometry.computeVertexNormals();
+        return geometry;
+      }
+
+      function addPanelLines() {
+        const material = new THREE.LineBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.13
+        });
+        const radius = WALL_RADIUS - 0.01;
+        const arcStart = WALL_ARC_START;
+        const arcLength = WALL_ARC_LENGTH;
+        for (let i = 1; i < 7; i += 1) {
+          const angle = arcStart + arcLength * (i / 7);
+          const x = Math.sin(angle) * radius * WALL_X_SCALE;
+          const z = -Math.cos(angle) * radius + WALL_Z_OFFSET;
+          const points = [
+            new THREE.Vector3(x, 0.28, z),
+            new THREE.Vector3(x, 3.18, z)
+          ];
+          const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), material);
+          galleryRig.add(line);
+        }
+      }
+
+      function addStandingCircle() {
+        const ring = new THREE.Mesh(
+          new THREE.RingGeometry(0.5, 0.56, 96),
+          new THREE.MeshBasicMaterial({
+            color: 0xcfd6d5,
+            transparent: true,
+            opacity: 0.58,
+            side: THREE.DoubleSide
+          })
+        );
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.set(0, 0.03, 2.05);
+        ring.renderOrder = 2;
+        galleryRig.add(ring);
+      }
+
+      function addProjectors() {
+        const projectorMaterial = new THREE.MeshStandardMaterial({
+          color: 0x111111,
+          roughness: 0.48,
+          metalness: 0.45
+        });
+        const lensMaterial = new THREE.MeshBasicMaterial({
+          color: 0xcfeaff,
+          transparent: true,
+          opacity: 0.72
+        });
+        const positions = [-2.9, 0, 2.9];
+        positions.forEach((x, index) => {
+          const projector = new THREE.Group();
+          const body = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.22, 0.42), projectorMaterial);
+          body.castShadow = true;
+          const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.06, 24), lensMaterial);
+          lens.rotation.x = Math.PI / 2;
+          lens.position.z = -0.24;
+          const mount = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.42, 12), projectorMaterial);
+          mount.position.y = 0.28;
+          projector.add(body, lens, mount);
+          projector.position.set(x, 3.05, 1.62 - Math.abs(index - 1) * 0.18);
+          projector.rotation.y = x * 0.06;
+          galleryRig.add(projector);
+        });
+      }
+
+      function addTrackLights() {
+        const railMaterial = new THREE.MeshStandardMaterial({ color: 0x090909, roughness: 0.55, metalness: 0.32 });
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(6.3, 0.04, 0.04), railMaterial);
+        rail.position.set(0, 3.22, 1.08);
+        galleryRig.add(rail);
+
+        [-2.7, -1.35, 1.35, 2.7].forEach((x) => {
+          const lightBody = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.12, 0.24, 20), railMaterial);
+          lightBody.position.set(x, 3.06, 1.08);
+          lightBody.rotation.x = Math.PI / 2.8;
+          lightBody.castShadow = true;
+          galleryRig.add(lightBody);
+
+          const spot = new THREE.SpotLight(0xe8f2ff, 0.82, 7.5, Math.PI / 6, 0.72, 1.7);
+          spot.position.set(x, 3, 0.92);
+          spot.target.position.set(x * 0.55, 0.02, -1.4);
+          spot.castShadow = true;
+          spot.shadow.mapSize.set(512, 512);
+          galleryRig.add(spot, spot.target);
+        });
+      }
+
+      function addMinimalBenches() {
+        const material = new THREE.MeshStandardMaterial({
+          color: 0x050505,
+          roughness: 0.68,
+          metalness: 0.18
+        });
+        [-4.2, 4.2].forEach((x) => {
+          const bench = new THREE.Mesh(new THREE.BoxGeometry(1.55, 0.28, 0.42), material);
+          bench.position.set(x, 0.32, 2.65);
+          bench.castShadow = true;
+          bench.receiveShadow = true;
+          galleryRig.add(bench);
+        });
+      }
+
+      function loadImage(src) {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = reject;
+          img.src = src;
+        });
+      }
+
       function resize() {
-        if (!images.room || !images.forest) return;
+        if (!images.bg) return;
 
         width = window.innerWidth;
         height = window.innerHeight;
         dpr = Math.min(window.devicePixelRatio || 1, 2);
-        canvas.width = Math.round(width * dpr);
-        canvas.height = Math.round(height * dpr);
-        canvas.style.width = `${width}px`;
-        canvas.style.height = `${height}px`;
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = "high";
+        projectionWidth = 2048;
+        projectionHeight = 1152;
 
-        projectionCanvas.width = PROJECTION_WIDTH;
-        projectionCanvas.height = PROJECTION_HEIGHT;
-        revealMaskCanvas.width = PROJECTION_WIDTH;
-        revealMaskCanvas.height = PROJECTION_HEIGHT;
-        colorLayerCanvas.width = PROJECTION_WIDTH;
-        colorLayerCanvas.height = PROJECTION_HEIGHT;
-        projectionCtx.imageSmoothingEnabled = true;
-        projectionCtx.imageSmoothingQuality = "high";
-        colorLayerCtx.imageSmoothingEnabled = true;
-        colorLayerCtx.imageSmoothingQuality = "high";
+        renderer.setPixelRatio(dpr);
+        renderer.setSize(width, height, false);
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
 
-        baseRoomRect = getCoverRect(images.room, width, height);
-        updateRoomRect(0);
-        forestRect = getContainRect(images.forest, PROJECTION_WIDTH, PROJECTION_HEIGHT);
+        for (const target of [projectionCanvas, maskCanvas, permanentMaskCanvas, colorCanvas]) {
+          target.width = projectionWidth;
+          target.height = projectionHeight;
+        }
+
+        for (const context of [projectionCtx, maskCtx, permanentMaskCtx, colorCtx]) {
+          context.setTransform(1, 0, 0, 1, 0, 0);
+          context.imageSmoothingEnabled = true;
+          context.imageSmoothingQuality = "high";
+        }
+
+        coverRect = getCoverRect(images.bg, projectionWidth, projectionHeight);
+
+        if (!pointer.active) {
+          pointer.x = projectionWidth * 0.5;
+          pointer.y = projectionHeight * 0.5;
+          butterfly.x = pointer.x;
+          butterfly.y = pointer.y;
+          butterfly.lastX = pointer.x;
+          butterfly.lastY = pointer.y;
+        }
       }
 
-      function render(time) {
-        const dt = Math.min((time - previousTime) / 1000, 0.05);
-        previousTime = time;
-        const seconds = time * 0.001;
-
-        updateViewerControls(dt);
-        updateButterflies(dt);
-        drawProjection(seconds, dt);
-        drawRoomComposite(seconds);
-
-        requestAnimationFrame(render);
+      function startPointer(event) {
+        look.dragging = true;
+        look.lastX = event.clientX;
+        look.lastY = event.clientY;
+        updatePointer(event);
       }
 
-      function createButterfly(x, y) {
+      function stopPointer() {
+        look.dragging = false;
+      }
+
+      function updatePointer(event) {
+        updateProjectionPointer(event.clientX, event.clientY);
+        pointer.active = true;
+
+        if (!look.dragging) return;
+        const dx = event.clientX - look.lastX;
+        const dy = event.clientY - look.lastY;
+        look.lastX = event.clientX;
+        look.lastY = event.clientY;
+        look.targetYaw = clamp(look.targetYaw - dx * 0.0018, -0.34, 0.34);
+        look.targetPitch = clamp(look.targetPitch - dy * 0.0013, -0.13, 0.13);
+      }
+
+      function updateTouch(event) {
+        event.preventDefault();
+        if (!event.touches.length) return;
+
+        const touch = event.touches[0];
+        updateProjectionPointer(touch.clientX, touch.clientY);
+        pointer.active = true;
+
+        if (event.touches.length === 1 && look.dragging) {
+          const dx = touch.clientX - look.lastX;
+          const dy = touch.clientY - look.lastY;
+          look.lastX = touch.clientX;
+          look.lastY = touch.clientY;
+          look.targetYaw = clamp(look.targetYaw - dx * 0.0018, -0.34, 0.34);
+          look.targetPitch = clamp(look.targetPitch - dy * 0.0013, -0.13, 0.13);
+        } else {
+          look.dragging = true;
+          look.lastX = touch.clientX;
+          look.lastY = touch.clientY;
+        }
+      }
+
+      function updateProjectionPointer(clientX, clientY) {
+        const hit = getProjectionHit(clientX, clientY);
+        pointer.x = hit.x;
+        pointer.y = hit.y;
+      }
+
+      function getProjectionHit(clientX, clientY) {
+        if (projectionWall) {
+          pointerNdc.set(
+            (clientX / Math.max(1, width)) * 2 - 1,
+            -(clientY / Math.max(1, height)) * 2 + 1
+          );
+          raycaster.setFromCamera(pointerNdc, camera);
+          const [hit] = raycaster.intersectObject(projectionWall, false);
+
+          if (hit?.uv) {
+            return {
+              x: clamp(hit.uv.x * projectionWidth, 0, projectionWidth),
+              y: clamp((1 - hit.uv.y) * projectionHeight, 0, projectionHeight)
+            };
+          }
+        }
+
         return {
-          x,
-          y,
-          lastX: x,
-          lastY: y,
-          angle: 0,
-          opacity: 1,
-          scale: 1
-        };
-      }
-
-      function createButterflyState() {
-        return {
-          mode: "follow",
-          hoverDoor: null,
-          hoverSeconds: 0,
-          flight: null
-        };
-      }
-
-      function updateViewerControls(dt) {
-        const moveSpeed = 1.7;
-        const panSpeed = 1.9;
-
-        if (pressedKeys.has("ArrowUp")) {
-          viewer.targetDepth += moveSpeed * dt;
-        }
-        if (pressedKeys.has("ArrowDown")) {
-          viewer.targetDepth -= moveSpeed * dt;
-        }
-        if (pressedKeys.has("ArrowLeft")) {
-          viewer.targetPan -= panSpeed * dt;
-        }
-        if (pressedKeys.has("ArrowRight")) {
-          viewer.targetPan += panSpeed * dt;
-        }
-
-        viewer.targetDepth = clamp(viewer.targetDepth, -0.55, 2.15);
-        viewer.targetPan = clamp(viewer.targetPan, -1.25, 1.25);
-        viewer.targetLift = viewer.targetDepth * 0.18;
-
-        const ease = 1 - Math.exp(-dt * 5.2);
-        viewer.depth += (viewer.targetDepth - viewer.depth) * ease;
-        viewer.pan += (viewer.targetPan - viewer.pan) * ease;
-        viewer.lift += (viewer.targetLift - viewer.lift) * ease;
-        updateRoomRect(dt);
-      }
-
-      function updateRoomRect() {
-        const zoom = 1 + viewer.depth * 0.43;
-        const shiftX = -viewer.pan * baseRoomRect.w * 0.18;
-        const shiftY = viewer.lift * baseRoomRect.h * 0.1;
-        roomRect = {
-          x: baseRoomRect.x - (baseRoomRect.w * zoom - baseRoomRect.w) * 0.5 + shiftX,
-          y: baseRoomRect.y - (baseRoomRect.h * zoom - baseRoomRect.h) * 0.42 + shiftY,
-          w: baseRoomRect.w * zoom,
-          h: baseRoomRect.h * zoom
+          x: clamp((clientX / Math.max(1, width)) * projectionWidth, 0, projectionWidth),
+          y: clamp((clientY / Math.max(1, height)) * projectionHeight, 0, projectionHeight)
         };
       }
 
       function handleKeyDown(event) {
-        const key = getArrowKey(event);
+        const key = getControlKey(event);
         if (!key) return;
         nudgeViewer(key);
         pressedKeys.add(key);
@@ -255,176 +580,249 @@
       }
 
       function handleKeyUp(event) {
-        const key = getArrowKey(event);
+        const key = getControlKey(event);
         if (!key) return;
         pressedKeys.delete(key);
         event.preventDefault();
       }
 
-      function getArrowKey(event) {
-        const key = event.key || event.code;
-        const code = event.code || event.key;
-        if (key === "ArrowUp" || code === "ArrowUp") return "ArrowUp";
-        if (key === "ArrowDown" || code === "ArrowDown") return "ArrowDown";
-        if (key === "ArrowLeft" || code === "ArrowLeft") return "ArrowLeft";
-        if (key === "ArrowRight" || code === "ArrowRight") return "ArrowRight";
+      function getControlKey(event) {
+        if (event.key === "ArrowUp") return "ArrowUp";
+        if (event.key === "ArrowDown") return "ArrowDown";
+        if (event.key === "ArrowLeft") return "ArrowLeft";
+        if (event.key === "ArrowRight") return "ArrowRight";
         return "";
       }
 
+      function render(time) {
+        const dt = Math.min((time - previousTime) / 1000, 0.05);
+        previousTime = time;
+
+        moveButterfly(dt);
+        updateTemporaryReveal(dt);
+        drawForest();
+        drawParticles(dt);
+        drawButterflyOnProjection();
+        updateCamera(dt);
+
+        projectionTexture.needsUpdate = true;
+        renderer.render(scene, camera);
+        requestAnimationFrame(render);
+      }
+
+      function updateCamera(dt) {
+        updateViewerPosition(dt);
+        const ease = 1 - Math.exp(-dt * 6);
+        look.yaw += (look.targetYaw - look.yaw) * ease;
+        look.pitch += (look.targetPitch - look.pitch) * ease;
+        viewer.x += (viewer.targetX - viewer.x) * ease;
+        viewer.z += (viewer.targetZ - viewer.z) * ease;
+        camera.position.x = viewer.x;
+        camera.position.z = viewer.z;
+        camera.rotation.set(look.pitch, look.yaw, 0, "YXZ");
+      }
+
+      function updateViewerPosition(dt) {
+        let forward = 0;
+        let sideways = 0;
+        if (pressedKeys.has("ArrowUp")) forward += 1;
+        if (pressedKeys.has("ArrowDown")) forward -= 1;
+        if (pressedKeys.has("ArrowLeft")) sideways -= 1;
+        if (pressedKeys.has("ArrowRight")) sideways += 1;
+        if (!forward && !sideways) return;
+
+        const length = Math.hypot(forward, sideways);
+        const speed = 2.2;
+        const yaw = look.yaw;
+        const forwardX = -Math.sin(yaw);
+        const forwardZ = -Math.cos(yaw);
+        const rightX = Math.cos(yaw);
+        const rightZ = -Math.sin(yaw);
+
+        viewer.targetX += ((forwardX * forward + rightX * sideways) / length) * speed * dt;
+        viewer.targetZ += ((forwardZ * forward + rightZ * sideways) / length) * speed * dt;
+        clampViewerTarget();
+      }
+
       function nudgeViewer(key) {
-        const depthStep = 0.18;
-        const panStep = 0.15;
+        const step = 0.24;
+        const yaw = look.yaw;
+        const forwardX = -Math.sin(yaw);
+        const forwardZ = -Math.cos(yaw);
+        const rightX = Math.cos(yaw);
+        const rightZ = -Math.sin(yaw);
 
-        if (key === "ArrowUp") viewer.targetDepth += depthStep;
-        if (key === "ArrowDown") viewer.targetDepth -= depthStep;
-        if (key === "ArrowLeft") viewer.targetPan -= panStep;
-        if (key === "ArrowRight") viewer.targetPan += panStep;
+        if (key === "ArrowUp") {
+          viewer.targetX += forwardX * step;
+          viewer.targetZ += forwardZ * step;
+        }
+        if (key === "ArrowDown") {
+          viewer.targetX -= forwardX * step;
+          viewer.targetZ -= forwardZ * step;
+        }
+        if (key === "ArrowLeft") {
+          viewer.targetX -= rightX * step;
+          viewer.targetZ -= rightZ * step;
+        }
+        if (key === "ArrowRight") {
+          viewer.targetX += rightX * step;
+          viewer.targetZ += rightZ * step;
+        }
+
+        clampViewerTarget();
       }
 
-      function focusScene() {
-        canvas.focus({ preventScroll: true });
+      function clampViewerTarget() {
+        viewer.targetX = clamp(viewer.targetX, -1.55, 1.55);
+        viewer.targetZ = clamp(viewer.targetZ, 1.45, 5.15);
       }
 
-      function updateButterflies(dt) {
-        moveBlueButterfly(dt);
-      }
-
-      function moveBlueButterfly(dt) {
+      function moveButterfly(dt) {
         butterfly.lastX = butterfly.x;
         butterfly.lastY = butterfly.y;
 
-        if (blueState.mode !== "follow") {
-          updateFlight(butterfly, blueState, dt);
-          updateButterflyAngle(butterfly);
-          revealButterflyPath(butterfly);
+        if (mode !== "follow") {
+          updateFlight(dt);
+          updateButterflyAngle();
           return;
         }
 
         const follow = 1 - Math.exp(-dt * 8.5);
         butterfly.x += (pointer.x - butterfly.x) * follow;
         butterfly.y += (pointer.y - butterfly.y) * follow;
+
         butterfly.opacity = 1;
         butterfly.scale = 1;
-        updateDoorHover(butterfly, blueState, dt);
-        updateButterflyAngle(butterfly);
-        revealButterflyPath(butterfly);
+        updateDoorHover(dt);
+        updateButterflyAngle();
       }
 
-      function updateButterflyAngle(target) {
-        const dx = target.x - target.lastX;
-        const dy = target.y - target.lastY;
+      function updateButterflyAngle() {
+        const dx = butterfly.x - butterfly.lastX;
+        const dy = butterfly.y - butterfly.lastY;
         if (Math.hypot(dx, dy) > 0.2) {
-          target.angle = Math.atan2(dy, dx) * 180 / Math.PI;
+          butterfly.angle = Math.atan2(dy, dx) * 180 / Math.PI;
         }
       }
 
-      function updateDoorHover(target, state, dt) {
-        const door = getCurrentDoor(target);
+      function updateDoorHover(dt) {
+        const door = getCurrentDoor();
 
         if (!door) {
-          state.hoverDoor = null;
-          state.hoverSeconds = 0;
+          hoverDoor = null;
+          hoverSeconds = 0;
           return;
         }
 
-        if (door !== state.hoverDoor) {
-          state.hoverDoor = door;
-          state.hoverSeconds = 0;
+        if (door !== hoverDoor) {
+          hoverDoor = door;
+          hoverSeconds = 0;
         }
 
-        state.hoverSeconds += dt;
-        if (state.hoverSeconds >= 5) {
-          beginEnteringCabin(target, state, door);
+        hoverSeconds += dt;
+        if (hoverSeconds >= 5) {
+          beginEnteringCabin(door);
         }
       }
 
-      function updateFlight(target, state, dt) {
-        const flight = state.flight;
+      function updateFlight(dt) {
         if (!flight) return;
 
         flight.elapsed += dt;
         const t = clamp(flight.elapsed / flight.duration, 0, 1);
         const eased = easeInOutCubic(t);
 
-        target.x = cubicBezier(flight.from.x, flight.controlA.x, flight.controlB.x, flight.to.x, eased);
-        target.y = cubicBezier(flight.from.y, flight.controlA.y, flight.controlB.y, flight.to.y, eased);
-        target.opacity = lerp(flight.fromOpacity, flight.toOpacity, flight.opacityEase(t));
-        target.scale = lerp(flight.fromScale, flight.toScale, flight.scaleEase(t));
+        butterfly.x = cubicBezier(
+          flight.from.x,
+          flight.controlA.x,
+          flight.controlB.x,
+          flight.to.x,
+          eased
+        );
+        butterfly.y = cubicBezier(
+          flight.from.y,
+          flight.controlA.y,
+          flight.controlB.y,
+          flight.to.y,
+          eased
+        );
+        butterfly.opacity = lerp(flight.fromOpacity, flight.toOpacity, flight.opacityEase(t));
+        butterfly.scale = lerp(flight.fromScale, flight.toScale, flight.scaleEase(t));
 
-        if (state.mode === "autoFlying" && t > 0.7) {
+        if (mode === "autoFlying" && t > 0.7) {
           drawLandingBloom(flight.to.x, flight.to.y);
         }
 
         if (t < 1) return;
 
-        if (state.mode === "entering") {
-          beginInsideWait(target, state, flight.door);
+        if (mode === "entering") {
+          beginInsideWait(flight.door);
           return;
         }
 
-        if (state.mode === "autoFlying") {
-          beginVanishing(target, state, flight.to);
+        if (mode === "autoFlying") {
+          beginVanishing(flight.to);
           return;
         }
 
-        if (state.mode === "vanishing") {
-          state.mode = "hidden";
-          state.flight = null;
+        if (mode === "vanishing") {
+          mode = "hidden";
+          flight = null;
         }
       }
 
-      function beginEnteringCabin(target, state, door) {
-        const doorCenter = getDoorCenter(door);
-        state.mode = "entering";
-        state.hoverDoor = null;
-        state.hoverSeconds = 0;
-        state.flight = {
+      function beginEnteringCabin(door) {
+        const target = getDoorCenter(door);
+        mode = "entering";
+        hoverDoor = null;
+        hoverSeconds = 0;
+        flight = {
           door,
           elapsed: 0,
           duration: 1.45,
-          from: { x: target.x, y: target.y },
-          controlA: { x: target.x, y: target.y - PROJECTION_HEIGHT * 0.048 },
-          controlB: { x: doorCenter.x, y: doorCenter.y - PROJECTION_HEIGHT * 0.03 },
-          to: doorCenter,
-          fromOpacity: target.opacity,
+          from: { x: butterfly.x, y: butterfly.y },
+          controlA: { x: butterfly.x, y: butterfly.y - projectionHeight * 0.048 },
+          controlB: { x: target.x, y: target.y - projectionHeight * 0.03 },
+          to: target,
+          fromOpacity: butterfly.opacity,
           toOpacity: 0,
-          fromScale: target.scale,
+          fromScale: butterfly.scale,
           toScale: 0.12,
           opacityEase: easeInCubic,
           scaleEase: easeInCubic
         };
       }
 
-      function beginInsideWait(target, state, door) {
-        state.mode = "inside";
-        state.flight = null;
+      function beginInsideWait(door) {
+        mode = "inside";
+        flight = null;
         window.setTimeout(() => {
-          if (state.mode === "inside") {
-            beginAutoFlight(target, state, door);
+          if (mode === "inside") {
+            beginAutoFlight(door);
           }
         }, 10000);
       }
 
-      function beginAutoFlight(target, state, door) {
+      function beginAutoFlight(door) {
         const start = getDoorCenter(door);
         const destination = getRandomLandingPoint();
 
-        target.x = start.x;
-        target.y = start.y;
-        target.lastX = start.x;
-        target.lastY = start.y;
-        state.mode = "autoFlying";
-        state.flight = {
+        butterfly.x = start.x;
+        butterfly.y = start.y;
+        butterfly.lastX = start.x;
+        butterfly.lastY = start.y;
+        mode = "autoFlying";
+        flight = {
           elapsed: 0,
           duration: 4.2,
           from: start,
           controlA: {
             x: lerp(start.x, destination.x, 0.28),
-            y: Math.min(start.y, destination.y) - PROJECTION_HEIGHT * 0.24
+            y: Math.min(start.y, destination.y) - projectionHeight * 0.24
           },
           controlB: {
             x: lerp(start.x, destination.x, 0.72),
-            y: Math.min(start.y, destination.y) - PROJECTION_HEIGHT * 0.18
+            y: Math.min(start.y, destination.y) - projectionHeight * 0.18
           },
           to: destination,
           fromOpacity: 0,
@@ -436,16 +834,16 @@
         };
       }
 
-      function beginVanishing(target, state, point) {
-        addPermanentReveal(point.x, point.y);
-        state.mode = "vanishing";
-        state.flight = {
+      function beginVanishing(point) {
+        drawPermanentColorPatch(point.x, point.y);
+        mode = "vanishing";
+        flight = {
           elapsed: 0,
           duration: 3.2,
-          from: { x: target.x, y: target.y },
-          controlA: { x: target.x + PROJECTION_WIDTH * 0.05, y: target.y - PROJECTION_HEIGHT * 0.08 },
-          controlB: { x: target.x - PROJECTION_WIDTH * 0.02, y: target.y - PROJECTION_HEIGHT * 0.13 },
-          to: { x: target.x, y: target.y - PROJECTION_HEIGHT * 0.18 },
+          from: { x: butterfly.x, y: butterfly.y },
+          controlA: { x: butterfly.x + projectionWidth * 0.05, y: butterfly.y - projectionHeight * 0.08 },
+          controlB: { x: butterfly.x - projectionWidth * 0.02, y: butterfly.y - projectionHeight * 0.13 },
+          to: { x: butterfly.x, y: butterfly.y - projectionHeight * 0.18 },
           fromOpacity: 1,
           toOpacity: 0,
           fromScale: 1,
@@ -455,649 +853,244 @@
         };
       }
 
-      function drawRoomComposite(seconds) {
-        ctx.clearRect(0, 0, width, height);
-        ctx.drawImage(images.room, roomRect.x, roomRect.y, roomRect.w, roomRect.h);
+      function updateTemporaryReveal(dt) {
+        maskCtx.save();
+        maskCtx.globalCompositeOperation = "destination-out";
+        maskCtx.fillStyle = `rgba(0, 0, 0, ${1 - Math.exp(-dt / 0.32)})`;
+        maskCtx.fillRect(0, 0, projectionWidth, projectionHeight);
+        maskCtx.restore();
 
-        ctx.save();
-        ctx.globalAlpha = 1;
-        ctx.globalCompositeOperation = "source-over";
-        drawProjectionToCurvedScreen();
-        ctx.restore();
+        if (mode === "inside" || mode === "hidden") {
+          return;
+        }
 
-        drawProjectionBlend(seconds);
-        drawRoomVignette();
-      }
-
-      function drawProjectionBlend(seconds) {
-        ctx.save();
-        clipWallSurfaces();
-        ctx.globalCompositeOperation = "multiply";
-        const topShadow = ctx.createLinearGradient(0, roomRect.y, 0, roomRect.y + roomRect.h * 0.38);
-        topShadow.addColorStop(0, "rgba(0, 0, 0, 0.32)");
-        topShadow.addColorStop(1, "rgba(255, 255, 255, 1)");
-        ctx.fillStyle = topShadow;
-        ctx.fillRect(roomRect.x, roomRect.y, roomRect.w, roomRect.h);
-        ctx.restore();
-      }
-
-      function drawRoomVignette() {
-        ctx.save();
-        const vignette = ctx.createRadialGradient(
-          width * 0.5,
-          height * 0.48,
-          Math.min(width, height) * 0.18,
-          width * 0.5,
-          height * 0.5,
-          Math.max(width, height) * 0.68
-        );
-        vignette.addColorStop(0, "rgba(0, 0, 0, 0)");
-        vignette.addColorStop(0.74, "rgba(0, 0, 0, 0.08)");
-        vignette.addColorStop(1, "rgba(0, 0, 0, 0.34)");
-        ctx.fillStyle = vignette;
-        ctx.fillRect(0, 0, width, height);
-        ctx.restore();
-      }
-
-      function clipWallSurfaces() {
-        ctx.beginPath();
-        const steps = 96;
+        const current = { x: butterfly.x, y: butterfly.y };
+        const last = { x: butterfly.lastX, y: butterfly.lastY };
+        const distance = Math.hypot(current.x - last.x, current.y - last.y);
+        const steps = Math.max(1, Math.ceil(distance / 26));
         for (let i = 0; i <= steps; i += 1) {
           const t = i / steps;
-          const point = mapRoomPoint(getCurvedScreenPoint(t, 0));
-          if (i === 0) ctx.moveTo(point.x, point.y);
-          else ctx.lineTo(point.x, point.y);
+          const x = lerp(last.x, current.x, t);
+          const y = lerp(last.y, current.y, t);
+          drawBrush(x, y);
         }
-        for (let i = steps; i >= 0; i -= 1) {
-          const point = mapRoomPoint(getCurvedScreenPoint(i / steps, 1));
-          ctx.lineTo(point.x, point.y);
-        }
-        ctx.closePath();
-        ctx.clip();
-      }
 
-      function mapRoomPoint(point) {
-        return {
-          x: roomRect.x + (point.x / ROOM_WIDTH) * roomRect.w,
-          y: roomRect.y + (point.y / ROOM_HEIGHT) * roomRect.h
-        };
-      }
-
-      function drawProjectionToCurvedScreen() {
-        const source = { x: 0, y: 0, w: PROJECTION_WIDTH, h: PROJECTION_HEIGHT };
-        const sliceCount = 420;
-        const bleed = 0.65 / sliceCount;
-
-        for (let i = 0; i < sliceCount; i += 1) {
-          const t0 = Math.max(0, i / sliceCount - bleed);
-          const t1 = Math.min(1, (i + 1) / sliceCount + bleed);
-          const topA = mapRoomPoint(getCurvedScreenPoint(t0, 0));
-          const topB = mapRoomPoint(getCurvedScreenPoint(t1, 0));
-          const bottomA = mapRoomPoint(getCurvedScreenPoint(t0, 1));
-          const bottomB = mapRoomPoint(getCurvedScreenPoint(t1, 1));
-          const sx = source.x + source.w * t0;
-          const sw = source.w * (t1 - t0);
-
-          ctx.save();
-          ctx.beginPath();
-          ctx.moveTo(topA.x, topA.y);
-          ctx.lineTo(topB.x, topB.y);
-          ctx.lineTo(bottomB.x, bottomB.y);
-          ctx.lineTo(bottomA.x, bottomA.y);
-          ctx.closePath();
-          ctx.clip();
-
-          const a = (topB.x - topA.x) / sw;
-          const b = (topB.y - topA.y) / sw;
-          const c = (bottomA.x - topA.x) / source.h;
-          const d = (bottomA.y - topA.y) / source.h;
-          ctx.setTransform(a * dpr, b * dpr, c * dpr, d * dpr, topA.x * dpr, topA.y * dpr);
-          ctx.drawImage(projectionCanvas, sx, source.y, sw, source.h, 0, 0, sw, source.h);
-          ctx.restore();
+        if (distance > 0.35) {
+          emitParticles(distance, current, last);
         }
       }
 
-      function getCurvedScreenPoint(t, v) {
-        const x = lerp(CURVE_LEFT, CURVE_RIGHT, t);
-        const edge = Math.abs(t - 0.5) * 2;
-        const top = 292 - Math.pow(edge, 1.62) * 308;
-        const bottom = 636 + Math.pow(edge, 1.38) * 132;
-        return {
-          x,
-          y: lerp(top, bottom, v)
-        };
-      }
-
-      function drawImageToQuad(targetCtx, image, source, quad, steps) {
-        const [topLeft, topRight, bottomRight, bottomLeft] = quad;
-        const sliceCount = Math.max(240, steps * 2);
-        const bleed = 0.7 / sliceCount;
-
-        for (let i = 0; i < sliceCount; i += 1) {
-          const t0 = Math.max(0, i / sliceCount - bleed);
-          const t1 = Math.min(1, (i + 1) / sliceCount + bleed);
-          const topA = lerpPoint(topLeft, topRight, t0);
-          const topB = lerpPoint(topLeft, topRight, t1);
-          const bottomA = lerpPoint(bottomLeft, bottomRight, t0);
-          const bottomB = lerpPoint(bottomLeft, bottomRight, t1);
-          const sx = source.x + source.w * t0;
-          const sw = source.w * (t1 - t0);
-
-          targetCtx.save();
-          targetCtx.beginPath();
-          targetCtx.moveTo(topA.x, topA.y);
-          targetCtx.lineTo(topB.x, topB.y);
-          targetCtx.lineTo(bottomB.x, bottomB.y);
-          targetCtx.lineTo(bottomA.x, bottomA.y);
-          targetCtx.closePath();
-          targetCtx.clip();
-
-          const a = (topB.x - topA.x) / sw;
-          const b = (topB.y - topA.y) / sw;
-          const c = (bottomA.x - topA.x) / source.h;
-          const d = (bottomA.y - topA.y) / source.h;
-          targetCtx.setTransform(a * dpr, b * dpr, c * dpr, d * dpr, topA.x * dpr, topA.y * dpr);
-          targetCtx.drawImage(image, sx, source.y, sw, source.h, 0, 0, sw, source.h);
-          targetCtx.restore();
-        }
-      }
-
-      function updatePointer(event) {
-        const point = getProjectionPointFromClient(event.clientX, event.clientY);
-        pointer.x = point.x;
-        pointer.y = point.y;
-        pointer.active = true;
-      }
-
-      function updateTouch(event) {
-        event.preventDefault();
-        if (!event.touches.length) return;
-
-        const touch = event.touches[0];
-        const point = getProjectionPointFromClient(touch.clientX, touch.clientY);
-        pointer.x = point.x;
-        pointer.y = point.y;
-        pointer.active = true;
-      }
-
-      function getProjectionPointFromClient(clientX, clientY) {
-        const roomPoint = {
-          x: ((clientX - roomRect.x) / Math.max(1, roomRect.w)) * ROOM_WIDTH,
-          y: ((clientY - roomRect.y) / Math.max(1, roomRect.h)) * ROOM_HEIGHT
-        };
-        const u = clamp((roomPoint.x - CURVE_LEFT) / (CURVE_RIGHT - CURVE_LEFT), 0, 1);
-        const top = getCurvedScreenPoint(u, 0);
-        const bottom = getCurvedScreenPoint(u, 1);
-        const v = clamp((roomPoint.y - top.y) / Math.max(1, bottom.y - top.y), 0, 1);
-
-        return {
-          x: u * PROJECTION_WIDTH,
-          y: v * PROJECTION_HEIGHT
-        };
-      }
-
-      function invertQuadPoint(point, quad) {
-        if (!pointInQuad(point, quad)) return null;
-
-        let u = 0.5;
-        let v = 0.5;
-        for (let i = 0; i < 10; i += 1) {
-          const q = bilinearPoint(quad, u, v);
-          const du = bilinearDu(quad, v);
-          const dv = bilinearDv(quad, u);
-          const ex = q.x - point.x;
-          const ey = q.y - point.y;
-          const det = du.x * dv.y - du.y * dv.x;
-          if (Math.abs(det) < 0.0001) break;
-
-          const stepU = (ex * dv.y - ey * dv.x) / det;
-          const stepV = (du.x * ey - du.y * ex) / det;
-          u = clamp(u - stepU, 0, 1);
-          v = clamp(v - stepV, 0, 1);
-        }
-
-        return { u, v };
-      }
-
-      function pointInQuad(point, quad) {
-        let inside = false;
-        for (let i = 0, j = quad.length - 1; i < quad.length; j = i, i += 1) {
-          const a = quad[i];
-          const b = quad[j];
-          const crosses = (a.y > point.y) !== (b.y > point.y);
-          if (crosses && point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x) {
-            inside = !inside;
-          }
-        }
-        return inside;
-      }
-
-      function bilinearPoint(quad, u, v) {
-        const top = lerpPoint(quad[0], quad[1], u);
-        const bottom = lerpPoint(quad[3], quad[2], u);
-        return lerpPoint(top, bottom, v);
-      }
-
-      function bilinearDu(quad, v) {
-        return {
-          x: lerp(quad[1].x - quad[0].x, quad[2].x - quad[3].x, v),
-          y: lerp(quad[1].y - quad[0].y, quad[2].y - quad[3].y, v)
-        };
-      }
-
-      function bilinearDv(quad, u) {
-        return {
-          x: lerp(quad[3].x - quad[0].x, quad[2].x - quad[1].x, u),
-          y: lerp(quad[3].y - quad[0].y, quad[2].y - quad[1].y, u)
-        };
-      }
-
-      function drawProjection(seconds) {
-        projectionCtx.clearRect(0, 0, PROJECTION_WIDTH, PROJECTION_HEIGHT);
-        drawContinuousForest(seconds);
-        drawColorRevealLayer();
-
-        drawForestLightFlow(seconds);
-        drawCabinWarmth(seconds);
-        drawAtmosphericFog(seconds);
-        drawWaterShimmer(seconds);
-        drawProjectorFalloff(seconds);
-        drawButterflyLayer(seconds);
-      }
-
-      function drawContinuousForest(seconds) {
-        const image = images.forest;
-
-        projectionCtx.save();
-        projectionCtx.filter = "blur(22px) saturate(1.08) brightness(0.92)";
-        projectionCtx.globalAlpha = 0.96;
-        projectionCtx.drawImage(
-          image,
-          -PROJECTION_WIDTH * 0.035,
-          -PROJECTION_HEIGHT * 0.05,
-          PROJECTION_WIDTH * 1.07,
-          PROJECTION_HEIGHT * 1.1
-        );
-        projectionCtx.restore();
-
-        projectionCtx.drawImage(
-          image,
-          forestRect.x,
-          forestRect.y,
-          forestRect.w,
-          forestRect.h
-        );
-      }
-
-      function drawColorRevealLayer() {
-        if (!images.colorForest) return;
-
-        colorLayerCtx.clearRect(0, 0, PROJECTION_WIDTH, PROJECTION_HEIGHT);
-        colorLayerCtx.save();
-        colorLayerCtx.filter = "blur(22px) saturate(1.28) contrast(1.08) brightness(1.02)";
-        colorLayerCtx.globalAlpha = 0.96;
-        colorLayerCtx.drawImage(
-          images.colorForest,
-          -PROJECTION_WIDTH * 0.035,
-          -PROJECTION_HEIGHT * 0.05,
-          PROJECTION_WIDTH * 1.07,
-          PROJECTION_HEIGHT * 1.1
-        );
-        colorLayerCtx.restore();
-
-        colorLayerCtx.save();
-        colorLayerCtx.filter = "saturate(1.48) contrast(1.18) brightness(1.04)";
-        colorLayerCtx.drawImage(
-          images.colorForest,
-          forestRect.x,
-          forestRect.y,
-          forestRect.w,
-          forestRect.h
-        );
-        colorLayerCtx.restore();
-
-        colorLayerCtx.globalCompositeOperation = "destination-in";
-        colorLayerCtx.drawImage(revealMaskCanvas, 0, 0);
-        colorLayerCtx.globalCompositeOperation = "source-over";
-
-        projectionCtx.save();
-        projectionCtx.globalCompositeOperation = "screen";
-        projectionCtx.globalAlpha = 0.92;
-        projectionCtx.drawImage(colorLayerCanvas, 0, 0);
-        projectionCtx.restore();
-      }
-
-      function drawButterflyLayer(seconds) {
-        drawPermanentGlows();
-        drawButterflyTrail(butterfly, "rgba(102, 210, 255, 0.28)");
-        drawButterflySprite(images.blueButterfly, butterfly, {
-          glow: "rgba(102, 210, 255, 0.86)",
-          core: "rgba(118, 226, 255, 0.92)"
-        }, seconds);
-      }
-
-      function drawButterflyTrail(target, color) {
-        if (target.opacity <= 0) return;
-        const distance = Math.hypot(target.x - target.lastX, target.y - target.lastY);
-        if (distance < 0.5) return;
-
-        projectionCtx.save();
-        projectionCtx.globalCompositeOperation = "screen";
-        projectionCtx.strokeStyle = color;
-        projectionCtx.lineWidth = getButterflyProjectionSize() * 0.2;
-        projectionCtx.lineCap = "round";
-        projectionCtx.beginPath();
-        projectionCtx.moveTo(target.lastX, target.lastY);
-        projectionCtx.lineTo(target.x, target.y);
-        projectionCtx.stroke();
-        projectionCtx.restore();
-      }
-
-      function drawButterflySprite(image, target, colors, seconds) {
-        if (target.opacity <= 0) return;
-
-        const size = getButterflyProjectionSize() * target.scale;
-        const sway = Math.sin(seconds * 6) * 5;
-        const tilt = clamp(target.angle * 0.08, -12, 12);
-
-        projectionCtx.save();
-        projectionCtx.globalAlpha = target.opacity;
-        projectionCtx.translate(target.x, target.y);
-        projectionCtx.rotate((tilt + sway) * Math.PI / 180);
-        projectionCtx.shadowColor = colors.glow;
-        projectionCtx.shadowBlur = size * 0.32;
-        if (image) {
-          projectionCtx.drawImage(image, -size * 0.5, -size * 0.5, size, size);
-        }
-        projectionCtx.restore();
+      function drawBrush(x, y) {
+        const radius = clamp(Math.min(projectionWidth, projectionHeight) * 0.065, 58, 125);
+        drawSoftMask(maskCtx, x, y, radius, 0.92);
       }
 
       function drawLandingBloom(x, y) {
-        drawSoftGlow(x, y, clamp(getButterflyProjectionSize() * 2.4, 120, 220), 0.24, "rgba(195, 235, 215, 1)");
+        const radius = clamp(Math.min(projectionWidth, projectionHeight) * 0.11, 86, 180);
+        drawSoftMask(maskCtx, x, y, radius, 0.72);
       }
 
-      function addPermanentReveal(x, y) {
-        addRevealSpot(x, y, clamp(getButterflyProjectionSize() * 4.8, 190, 360), 0.72);
-        permanentGlows.push({
-          x,
-          y,
-          radius: clamp(getButterflyProjectionSize() * 5.2, 220, 390),
-          strength: 0.58,
-          color: "rgba(255, 230, 170, 1)"
-        });
+      function drawPermanentColorPatch(x, y) {
+        const radius = clamp(getButterflyProjectionSize() * 5.4, 180, 380);
+        drawSoftMask(permanentMaskCtx, x, y, radius, 1);
       }
 
-      function revealButterflyPath(target) {
-        const distance = Math.hypot(target.x - target.lastX, target.y - target.lastY);
-        if (distance < 1.2 || target.opacity <= 0) return;
+      function drawSoftMask(targetCtx, x, y, radius, strength) {
+        const inner = radius * 0.18;
+        const gradient = targetCtx.createRadialGradient(x, y, inner, x, y, radius);
 
-        revealMaskCtx.save();
-        revealMaskCtx.globalCompositeOperation = "source-over";
-        revealMaskCtx.strokeStyle = "rgba(255, 255, 255, 0.34)";
-        revealMaskCtx.lineWidth = getButterflyProjectionSize() * 0.72;
-        revealMaskCtx.lineCap = "round";
-        revealMaskCtx.lineJoin = "round";
-        revealMaskCtx.shadowColor = "rgba(255, 255, 255, 0.7)";
-        revealMaskCtx.shadowBlur = getButterflyProjectionSize() * 0.38;
-        revealMaskCtx.beginPath();
-        revealMaskCtx.moveTo(target.lastX, target.lastY);
-        revealMaskCtx.lineTo(target.x, target.y);
-        revealMaskCtx.stroke();
-        revealMaskCtx.restore();
+        gradient.addColorStop(0, `rgba(255, 255, 255, ${strength})`);
+        gradient.addColorStop(0.35, `rgba(255, 255, 255, ${strength * 0.6})`);
+        gradient.addColorStop(0.72, `rgba(255, 255, 255, ${strength * 0.2})`);
+        gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
 
-        addRevealSpot(target.x, target.y, getButterflyProjectionSize() * 0.9, 0.2);
+        targetCtx.save();
+        targetCtx.globalCompositeOperation = "source-over";
+        targetCtx.fillStyle = gradient;
+        targetCtx.beginPath();
+        targetCtx.arc(x, y, radius, 0, Math.PI * 2);
+        targetCtx.fill();
+        targetCtx.restore();
       }
 
-      function addRevealSpot(x, y, radius, strength) {
-        const glow = revealMaskCtx.createRadialGradient(x, y, 0, x, y, radius);
-        glow.addColorStop(0, `rgba(255, 255, 255, ${strength})`);
-        glow.addColorStop(0.48, `rgba(255, 255, 255, ${strength * 0.48})`);
-        glow.addColorStop(1, "rgba(255, 255, 255, 0)");
-        revealMaskCtx.save();
-        revealMaskCtx.globalCompositeOperation = "source-over";
-        revealMaskCtx.fillStyle = glow;
-        revealMaskCtx.beginPath();
-        revealMaskCtx.arc(x, y, radius, 0, Math.PI * 2);
-        revealMaskCtx.fill();
-        revealMaskCtx.restore();
+      function drawForest() {
+        projectionCtx.clearRect(0, 0, projectionWidth, projectionHeight);
+        projectionCtx.drawImage(images.bg, coverRect.x, coverRect.y, coverRect.w, coverRect.h);
+
+        drawColorLayer(maskCanvas);
+        drawColorLayer(permanentMaskCanvas, true);
+        drawProjectionFalloff();
       }
 
-      function drawPermanentGlows() {
-        permanentGlows.forEach((glow) => {
-          drawSoftGlow(glow.x, glow.y, glow.radius, glow.strength, glow.color);
-        });
-      }
+      function drawProjectionFalloff() {
+        projectionCtx.save();
+        projectionCtx.globalCompositeOperation = "multiply";
+        const top = projectionCtx.createLinearGradient(0, 0, 0, projectionHeight * 0.24);
+        top.addColorStop(0, "rgba(0, 0, 0, 0.38)");
+        top.addColorStop(1, "rgba(255, 255, 255, 1)");
+        projectionCtx.fillStyle = top;
+        projectionCtx.fillRect(0, 0, projectionWidth, projectionHeight * 0.24);
 
-      function drawSoftGlow(x, y, radius, strength, color) {
+        const bottom = projectionCtx.createLinearGradient(0, projectionHeight, 0, projectionHeight * 0.72);
+        bottom.addColorStop(0, "rgba(0, 0, 0, 0.34)");
+        bottom.addColorStop(1, "rgba(255, 255, 255, 1)");
+        projectionCtx.fillStyle = bottom;
+        projectionCtx.fillRect(0, projectionHeight * 0.72, projectionWidth, projectionHeight * 0.28);
+        projectionCtx.restore();
+
         projectionCtx.save();
         projectionCtx.globalCompositeOperation = "screen";
-        const glow = projectionCtx.createRadialGradient(x, y, 0, x, y, radius);
-        glow.addColorStop(0, color.replace("1)", `${strength})`));
-        glow.addColorStop(0.42, color.replace("1)", `${strength * 0.42})`));
-        glow.addColorStop(1, color.replace("1)", "0)"));
-        projectionCtx.fillStyle = glow;
-        projectionCtx.beginPath();
-        projectionCtx.arc(x, y, radius, 0, Math.PI * 2);
-        projectionCtx.fill();
+        const centerGlow = projectionCtx.createRadialGradient(
+          projectionWidth * 0.5,
+          projectionHeight * 0.48,
+          projectionWidth * 0.08,
+          projectionWidth * 0.5,
+          projectionHeight * 0.48,
+          projectionWidth * 0.7
+        );
+        centerGlow.addColorStop(0, "rgba(255, 255, 255, 0.06)");
+        centerGlow.addColorStop(1, "rgba(255, 255, 255, 0)");
+        projectionCtx.fillStyle = centerGlow;
+        projectionCtx.fillRect(0, 0, projectionWidth, projectionHeight);
         projectionCtx.restore();
       }
 
-      function drawForestLightFlow(seconds) {
-        projectionCtx.save();
-        projectionCtx.globalCompositeOperation = "screen";
-        projectionCtx.filter = "blur(16px)";
+      function drawColorLayer(sourceMask, boosted = false) {
+        colorCtx.clearRect(0, 0, projectionWidth, projectionHeight);
+        if (boosted) {
+          colorCtx.filter = "saturate(1.7) contrast(1.32) brightness(1.04)";
+        }
+        colorCtx.drawImage(images.color, coverRect.x, coverRect.y, coverRect.w, coverRect.h);
+        colorCtx.filter = "none";
+        colorCtx.globalCompositeOperation = "destination-in";
+        colorCtx.drawImage(sourceMask, 0, 0, projectionWidth, projectionHeight);
+        colorCtx.globalCompositeOperation = "source-over";
+        projectionCtx.drawImage(colorCanvas, 0, 0, projectionWidth, projectionHeight);
 
-        canopyLightBands.forEach((band) => {
-          const travel = ((seconds * band.speed + band.phase) % 1.35) - 0.18;
-          const x = PROJECTION_WIDTH * travel;
-          const y = PROJECTION_HEIGHT * band.y + Math.sin(seconds * band.float + band.phase * 6) * PROJECTION_HEIGHT * 0.018;
-          const w = PROJECTION_WIDTH * band.w;
-          const h = PROJECTION_HEIGHT * band.h;
-          const glow = projectionCtx.createLinearGradient(x - w, y - h, x + w, y + h);
-          glow.addColorStop(0, "rgba(210, 232, 198, 0)");
-          glow.addColorStop(0.44, `rgba(210, 232, 198, ${band.alpha})`);
-          glow.addColorStop(0.62, `rgba(255, 224, 150, ${band.alpha * 0.38})`);
-          glow.addColorStop(1, "rgba(210, 232, 198, 0)");
+        if (boosted) {
+          projectionCtx.save();
+          projectionCtx.globalAlpha = 0.16;
+          projectionCtx.globalCompositeOperation = "screen";
+          projectionCtx.drawImage(colorCanvas, 0, 0, projectionWidth, projectionHeight);
+          projectionCtx.restore();
+        }
+      }
+
+      function emitParticles(distance, current, last) {
+        if (mode === "inside" || mode === "hidden") return;
+
+        const count = clamp(Math.round(distance / 24), 1, 5);
+        const direction = Math.atan2(current.y - last.y, current.x - last.x) + Math.PI;
+
+        for (let i = 0; i < count; i += 1) {
+          const spread = (Math.random() - 0.5) * 1.15;
+          const speed = 42 + Math.random() * 120;
+          const size = 1.3 + Math.random() * 2.4;
+
+          particles.push({
+            x: current.x + (Math.random() - 0.5) * 11,
+            y: current.y + (Math.random() - 0.5) * 11,
+            vx: Math.cos(direction + spread) * speed,
+            vy: Math.sin(direction + spread) * speed - 11,
+            life: 0.45 + Math.random() * 0.4,
+            maxLife: 0.45 + Math.random() * 0.4,
+            size
+          });
+        }
+
+        if (particles.length > 180) {
+          particles.splice(0, particles.length - 180);
+        }
+      }
+
+      function drawParticles(dt) {
+        projectionCtx.save();
+        projectionCtx.globalCompositeOperation = "lighter";
+
+        for (let i = particles.length - 1; i >= 0; i -= 1) {
+          const particle = particles[i];
+          particle.life -= dt;
+
+          if (particle.life <= 0) {
+            particles.splice(i, 1);
+            continue;
+          }
+
+          particle.x += particle.vx * dt;
+          particle.y += particle.vy * dt;
+          particle.vx *= Math.pow(0.86, dt * 60);
+          particle.vy *= Math.pow(0.86, dt * 60);
+
+          const alpha = Math.pow(particle.life / particle.maxLife, 1.6);
+          const glow = projectionCtx.createRadialGradient(
+            particle.x,
+            particle.y,
+            0,
+            particle.x,
+            particle.y,
+            particle.size * 4
+          );
+
+          glow.addColorStop(0, `rgba(255, 245, 186, ${0.46 * alpha})`);
+          glow.addColorStop(0.48, `rgba(112, 218, 255, ${0.24 * alpha})`);
+          glow.addColorStop(1, "rgba(112, 218, 255, 0)");
 
           projectionCtx.fillStyle = glow;
           projectionCtx.beginPath();
-          projectionCtx.ellipse(x, y, w, h, band.angle, 0, Math.PI * 2);
+          projectionCtx.arc(particle.x, particle.y, particle.size * 4, 0, Math.PI * 2);
           projectionCtx.fill();
-        });
+        }
 
-        projectionCtx.filter = "none";
         projectionCtx.restore();
       }
 
-      function drawCabinWarmth(seconds) {
-        const pulse = 0.68 + Math.sin(seconds * 0.68) * 0.2 + Math.sin(seconds * 0.27) * 0.1;
+      function drawButterflyOnProjection() {
+        if (!images.butterfly || butterfly.opacity <= 0) return;
+
+        const size = getButterflyProjectionSize() * butterfly.scale;
+        const sway = Math.sin(performance.now() * 0.006) * 5;
+        const tilt = clamp(butterfly.angle * 0.08, -12, 12);
 
         projectionCtx.save();
-        projectionCtx.globalCompositeOperation = "screen";
-        doorZones.forEach((cabin, index) => {
-          const x = forestRect.x + forestRect.w * cabin.x;
-          const y = forestRect.y + forestRect.h * cabin.y;
-          const rx = forestRect.w * cabin.rx * 1.15 * (0.68 + index * 0.02);
-          const ry = forestRect.h * cabin.ry * 0.76;
-          const gradient = projectionCtx.createRadialGradient(x, y, 0, x, y, Math.max(rx, ry));
-          gradient.addColorStop(0, `rgba(255, 190, 92, ${0.3 * pulse})`);
-          gradient.addColorStop(0.42, `rgba(255, 144, 54, ${0.15 * pulse})`);
-          gradient.addColorStop(1, "rgba(255, 144, 54, 0)");
-          projectionCtx.fillStyle = gradient;
-          projectionCtx.beginPath();
-          projectionCtx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
-          projectionCtx.fill();
-        });
+        projectionCtx.globalAlpha = butterfly.opacity;
+        projectionCtx.shadowColor = "rgba(102, 210, 255, 0.45)";
+        projectionCtx.shadowBlur = size * 0.24;
+        projectionCtx.translate(butterfly.x, butterfly.y);
+        projectionCtx.rotate((tilt + sway) * Math.PI / 180);
+        projectionCtx.drawImage(images.butterfly, -size * 0.5, -size * 0.5, size, size);
         projectionCtx.restore();
-      }
-
-      function drawAtmosphericFog(seconds) {
-        projectionCtx.save();
-        projectionCtx.globalCompositeOperation = "screen";
-        projectionCtx.filter = "blur(18px)";
-
-        fogSheets.forEach((fog) => {
-          const x = PROJECTION_WIDTH * (((seconds * fog.speed + fog.phase) % 1.42) - 0.21);
-          const y = PROJECTION_HEIGHT * fog.y + Math.sin(seconds * fog.float + fog.phase * 5) * PROJECTION_HEIGHT * 0.018;
-          const w = PROJECTION_WIDTH * fog.w;
-          const h = PROJECTION_HEIGHT * fog.h;
-          const gradient = projectionCtx.createLinearGradient(x - w, y, x + w, y);
-          gradient.addColorStop(0, "rgba(190, 215, 210, 0)");
-          gradient.addColorStop(0.22, `rgba(190, 215, 210, ${fog.alpha * 0.34})`);
-          gradient.addColorStop(0.54, `rgba(198, 222, 216, ${fog.alpha})`);
-          gradient.addColorStop(0.82, `rgba(190, 215, 210, ${fog.alpha * 0.28})`);
-          gradient.addColorStop(1, "rgba(190, 215, 210, 0)");
-          projectionCtx.fillStyle = gradient;
-          projectionCtx.beginPath();
-          projectionCtx.ellipse(x, y, w, h, fog.angle, 0, Math.PI * 2);
-          projectionCtx.fill();
-        });
-
-        projectionCtx.filter = "none";
-        projectionCtx.restore();
-      }
-
-      function drawWaterShimmer(seconds) {
-        projectionCtx.save();
-        projectionCtx.globalCompositeOperation = "screen";
-        projectionCtx.lineCap = "round";
-        projectionCtx.filter = "blur(3px)";
-
-        waterStreaks.forEach((line) => {
-          const travel = ((seconds * line.speed + line.phase) % 1.25) - 0.15;
-          const x = PROJECTION_WIDTH * (0.28 + travel * 0.43);
-          const y = PROJECTION_HEIGHT * line.y + Math.sin(seconds * line.float + line.phase * 4) * PROJECTION_HEIGHT * 0.006;
-          const alpha = line.alpha * (0.72 + Math.sin(seconds * 0.18 + line.phase * 5) * 0.18);
-          const stroke = projectionCtx.createLinearGradient(x - line.length, y, x + line.length, y + line.drop);
-          stroke.addColorStop(0, "rgba(205, 236, 226, 0)");
-          stroke.addColorStop(0.45, `rgba(205, 236, 226, ${alpha})`);
-          stroke.addColorStop(1, "rgba(205, 236, 226, 0)");
-          projectionCtx.strokeStyle = stroke;
-          projectionCtx.lineWidth = line.width;
-          projectionCtx.beginPath();
-          projectionCtx.moveTo(x - line.length, y);
-          projectionCtx.quadraticCurveTo(
-            x,
-            y + line.curve + Math.sin(seconds * 0.16 + line.phase) * 4,
-            x + line.length,
-            y + line.drop
-          );
-          projectionCtx.stroke();
-        });
-
-        projectionCtx.filter = "none";
-        projectionCtx.restore();
-      }
-
-      function drawProjectorFalloff(seconds) {
-        projectionCtx.save();
-        projectionCtx.globalCompositeOperation = "multiply";
-
-        const top = projectionCtx.createLinearGradient(0, 0, 0, PROJECTION_HEIGHT * 0.22);
-        top.addColorStop(0, "rgba(0, 0, 0, 0.22)");
-        top.addColorStop(1, "rgba(255, 255, 255, 1)");
-        projectionCtx.fillStyle = top;
-        projectionCtx.fillRect(0, 0, PROJECTION_WIDTH, PROJECTION_HEIGHT * 0.22);
-
-        const left = projectionCtx.createLinearGradient(0, 0, PROJECTION_WIDTH * 0.18, 0);
-        left.addColorStop(0, "rgba(0, 0, 0, 0.18)");
-        left.addColorStop(1, "rgba(255, 255, 255, 1)");
-        projectionCtx.fillStyle = left;
-        projectionCtx.fillRect(0, 0, PROJECTION_WIDTH * 0.18, PROJECTION_HEIGHT);
-
-        const right = projectionCtx.createLinearGradient(PROJECTION_WIDTH, 0, PROJECTION_WIDTH * 0.82, 0);
-        right.addColorStop(0, "rgba(0, 0, 0, 0.18)");
-        right.addColorStop(1, "rgba(255, 255, 255, 1)");
-        projectionCtx.fillStyle = right;
-        projectionCtx.fillRect(PROJECTION_WIDTH * 0.82, 0, PROJECTION_WIDTH * 0.18, PROJECTION_HEIGHT);
-        projectionCtx.restore();
-
-        projectionCtx.save();
-        projectionCtx.globalCompositeOperation = "screen";
-        const projectorBreath = 0.018 + Math.sin(seconds * 0.22) * 0.008 + Math.sin(seconds * 0.071) * 0.006;
-        const projectorGlow = projectionCtx.createRadialGradient(
-          PROJECTION_WIDTH * (0.52 + Math.sin(seconds * 0.05) * 0.03),
-          PROJECTION_HEIGHT * 0.48,
-          PROJECTION_WIDTH * 0.08,
-          PROJECTION_WIDTH * 0.5,
-          PROJECTION_HEIGHT * 0.52,
-          PROJECTION_WIDTH * 0.82
-        );
-        projectorGlow.addColorStop(0, `rgba(220, 232, 214, ${projectorBreath})`);
-        projectorGlow.addColorStop(0.58, `rgba(210, 224, 212, ${projectorBreath * 0.45})`);
-        projectorGlow.addColorStop(1, "rgba(210, 224, 212, 0)");
-        projectionCtx.fillStyle = projectorGlow;
-        projectionCtx.fillRect(0, 0, PROJECTION_WIDTH, PROJECTION_HEIGHT);
-        projectionCtx.restore();
-      }
-
-      function createCanopyLightBands() {
-        return [
-          { y: 0.18, w: 0.34, h: 0.09, speed: 0.014, float: 0.12, alpha: 0.05, angle: -0.12, phase: 0.04 },
-          { y: 0.29, w: 0.42, h: 0.12, speed: 0.01, float: 0.09, alpha: 0.04, angle: 0.08, phase: 0.42 },
-          { y: 0.38, w: 0.28, h: 0.08, speed: 0.012, float: 0.11, alpha: 0.035, angle: -0.18, phase: 0.78 },
-          { y: 0.47, w: 0.5, h: 0.1, speed: 0.008, float: 0.07, alpha: 0.03, angle: 0.16, phase: 1.1 }
-        ];
-      }
-
-      function createFogSheets() {
-        return [
-          { y: 0.24, w: 0.46, h: 0.065, speed: 0.012, float: 0.08, alpha: 0.07, angle: 0.02, phase: 0 },
-          { y: 0.34, w: 0.58, h: 0.075, speed: 0.008, float: 0.07, alpha: 0.055, angle: -0.04, phase: 0.32 },
-          { y: 0.46, w: 0.5, h: 0.06, speed: 0.01, float: 0.09, alpha: 0.05, angle: 0.05, phase: 0.67 },
-          { y: 0.57, w: 0.66, h: 0.085, speed: 0.007, float: 0.06, alpha: 0.06, angle: -0.03, phase: 0.96 },
-          { y: 0.66, w: 0.6, h: 0.075, speed: 0.006, float: 0.05, alpha: 0.04, angle: 0.04, phase: 1.2 }
-        ];
-      }
-
-      function createWaterStreaks() {
-        return [
-          { y: 0.642, speed: 0.055, phase: 0.05, length: 170, width: 2.4, alpha: 0.105, curve: 8, drop: 8, float: 0.11 },
-          { y: 0.676, speed: 0.043, phase: 0.26, length: 230, width: 3.2, alpha: 0.08, curve: 12, drop: 12, float: 0.09 },
-          { y: 0.708, speed: 0.038, phase: 0.48, length: 260, width: 4.2, alpha: 0.07, curve: 16, drop: 16, float: 0.08 },
-          { y: 0.744, speed: 0.032, phase: 0.7, length: 300, width: 5.4, alpha: 0.055, curve: 20, drop: 22, float: 0.07 },
-          { y: 0.79, speed: 0.028, phase: 0.92, length: 340, width: 6.2, alpha: 0.045, curve: 24, drop: 28, float: 0.06 }
-        ];
       }
 
       function getButterflyProjectionSize() {
-        return clamp(PROJECTION_WIDTH * 0.043, 64, 92);
+        return clamp(projectionWidth * 0.034, 48, 78);
       }
 
-      function getCurrentDoor(target) {
+      function getCurrentDoor() {
         return doorZones.find((door) => {
           const center = getDoorCenter(door);
-          const rx = forestRect.w * door.rx;
-          const ry = forestRect.h * door.ry;
-          const dx = (target.x - center.x) / rx;
-          const dy = (target.y - center.y) / ry;
+          const rx = door.rx * coverRect.w;
+          const ry = door.ry * coverRect.h;
+          const dx = (butterfly.x - center.x) / rx;
+          const dy = (butterfly.y - center.y) / ry;
+
           return dx * dx + dy * dy <= 1;
         });
       }
 
       function getDoorCenter(door) {
         return {
-          x: forestRect.x + forestRect.w * door.x,
-          y: forestRect.y + forestRect.h * door.y
+          x: coverRect.x + door.x * coverRect.w,
+          y: coverRect.y + door.y * coverRect.h
         };
       }
 
       function getRandomLandingPoint() {
-        const margin = Math.min(PROJECTION_WIDTH, PROJECTION_HEIGHT) * 0.16;
+        const margin = Math.min(projectionWidth, projectionHeight) * 0.16;
 
         return {
-          x: margin + Math.random() * Math.max(1, PROJECTION_WIDTH - margin * 2),
-          y: margin + Math.random() * Math.max(1, PROJECTION_HEIGHT - margin * 2)
+          x: margin + Math.random() * Math.max(1, projectionWidth - margin * 2),
+          y: margin + Math.random() * Math.max(1, projectionHeight - margin * 2)
         };
-      }
-
-      function loadImage(src) {
-        return new Promise((resolve, reject) => {
-          const img = new Image();
-          img.onload = () => resolve(img);
-          img.onerror = reject;
-          img.src = src;
-        });
       }
 
       function getCoverRect(img, containerWidth, containerHeight) {
@@ -1115,36 +1108,8 @@
         return { x: (containerWidth - w) * 0.5, y: 0, w, h };
       }
 
-      function getContainRect(img, containerWidth, containerHeight, scale = 1) {
-        const imageRatio = img.naturalWidth / img.naturalHeight;
-        const containerRatio = containerWidth / containerHeight;
-        let w = containerWidth;
-        let h = w / imageRatio;
-
-        if (h > containerHeight) {
-          h = containerHeight;
-          w = h * imageRatio;
-        }
-
-        w *= scale;
-        h *= scale;
-        return {
-          x: (containerWidth - w) * 0.5,
-          y: (containerHeight - h) * 0.5,
-          w,
-          h
-        };
-      }
-
       function lerp(a, b, t) {
         return a + (b - a) * t;
-      }
-
-      function lerpPoint(a, b, t) {
-        return {
-          x: lerp(a.x, b.x, t),
-          y: lerp(a.y, b.y, t)
-        };
       }
 
       function cubicBezier(a, b, c, d, t) {
