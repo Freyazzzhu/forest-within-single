@@ -348,11 +348,12 @@
       function drawCurvedProjection() {
         const left = -width * 0.05;
         const right = width * 1.05;
-        const slices = 360;
+        const slices = 760;
+        const bleed = 0.85 / slices;
         const source = { x: 0, y: 0, w: PROJECTION_WIDTH, h: PROJECTION_HEIGHT };
         for (let i = 0; i < slices; i += 1) {
-          const t0 = i / slices;
-          const t1 = (i + 1) / slices;
+          const t0 = Math.max(0, i / slices - bleed);
+          const t1 = Math.min(1, (i + 1) / slices + bleed);
           const topA = getScreenPoint(left, right, t0, 0);
           const topB = getScreenPoint(left, right, t1, 0);
           const bottomA = getScreenPoint(left, right, t0, 1);
