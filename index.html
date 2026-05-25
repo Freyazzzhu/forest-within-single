@@ -867,7 +867,7 @@
         const current = { x: butterfly.x, y: butterfly.y };
         const last = { x: butterfly.lastX, y: butterfly.lastY };
         const distance = Math.hypot(current.x - last.x, current.y - last.y);
-        const steps = Math.max(1, Math.ceil(distance / 26));
+        const steps = Math.max(1, Math.ceil(distance / 18));
         for (let i = 0; i <= steps; i += 1) {
           const t = i / steps;
           const x = lerp(last.x, current.x, t);
@@ -881,8 +881,8 @@
       }
 
       function drawBrush(x, y) {
-        const radius = clamp(Math.min(projectionWidth, projectionHeight) * 0.065, 58, 125);
-        drawSoftMask(maskCtx, x, y, radius, 0.92);
+        const radius = clamp(Math.min(projectionWidth, projectionHeight) * 0.092, 78, 172);
+        drawSoftMask(maskCtx, x, y, radius, 1);
       }
 
       function drawLandingBloom(x, y) {
@@ -957,9 +957,9 @@
 
       function drawColorLayer(sourceMask, boosted = false) {
         colorCtx.clearRect(0, 0, projectionWidth, projectionHeight);
-        if (boosted) {
-          colorCtx.filter = "saturate(1.7) contrast(1.32) brightness(1.04)";
-        }
+        colorCtx.filter = boosted
+          ? "saturate(2.25) contrast(1.42) brightness(1.06)"
+          : "saturate(1.95) contrast(1.24) brightness(1.03)";
         colorCtx.drawImage(images.color, coverRect.x, coverRect.y, coverRect.w, coverRect.h);
         colorCtx.filter = "none";
         colorCtx.globalCompositeOperation = "destination-in";
@@ -969,7 +969,7 @@
 
         if (boosted) {
           projectionCtx.save();
-          projectionCtx.globalAlpha = 0.16;
+          projectionCtx.globalAlpha = 0.22;
           projectionCtx.globalCompositeOperation = "screen";
           projectionCtx.drawImage(colorCanvas, 0, 0, projectionWidth, projectionHeight);
           projectionCtx.restore();
