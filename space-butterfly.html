@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Forest Within - Space Butterfly</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #020202;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      outline: none;
+    }
+
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: rgba(255, 255, 255, 0.72);
+      font: 16px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #020202;
+      transition: opacity 360ms ease, visibility 360ms ease;
+    }
+
+    #loading.is-hidden {
+      opacity: 0;
+      visibility: hidden;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene" tabindex="0" aria-label="Curved forest room with one keyboard controlled butterfly"></canvas>
+  <div id="loading">Loading forest...</div>
+
+  <script src="assets/vendor/embedded-assets.js"></script>
+  <script>
+    (() => {
+      const canvas = document.getElementById("scene");
+      const ctx = canvas.getContext("2d");
+      const loadingEl = document.getElementById("loading");
+
+      const projectionCanvas = document.createElement("canvas");
+      const projectionCtx = projectionCanvas.getContext("2d");
+      const maskCanvas = document.createElement("canvas");
+      const maskCtx = maskCanvas.getContext("2d");
+      const colorCanvas = document.createElement("canvas");
+      const colorCtx = colorCanvas.getContext("2d");
+
+      const PROJECTION_WIDTH = 1800;
+      const PROJECTION_HEIGHT = 900;
+      const keys = new Set();
+      const images = {};
+
+      let width = 0;
+      let height = 0;
+      let dpr = 1;
+      let previousTime = performance.now();
+      let coverRect = { x: 0, y: 0, w: PROJECTION_WIDTH, h: PROJECTION_HEIGHT };
+
+      const butterfly = {
+        x: PROJECTION_WIDTH * 0.5,
+        y: PROJECTION_HEIGHT + 180,
+        lastX: PROJECTION_WIDTH * 0.5,
+        lastY: PROJECTION_HEIGHT + 180,
+        angle: -90,
+        opacity: 0,
+        scale: 0.72,
+        state: "hidden",
+        enterElapsed: 0,
+        enterDuration: 4.4,
+        startX: PROJECTION_WIDTH * 0.5,
+        startY: PROJECTION_HEIGHT + 180,
+        endX: PROJECTION_WIDTH * 0.5,
+        endY: PROJECTION_HEIGHT * 0.58
+      };
+
+      Promise.all([
+        loadImage(window.FOREST_WITHIN_EMBEDDED_ASSETS.bg),
+        loadImage(window.FOREST_WITHIN_EMBEDDED_ASSETS.color),
+        loadImage(window.FOREST_WITHIN_EMBEDDED_ASSETS.butterfly)
+      ]).then(([bg, color, butterflyImage]) => {
+        images.bg = bg;
+        images.color = color;
+        images.butterfly = butterflyImage;
+        resize();
+        loadingEl.classList.add("is-hidden");
+        canvas.focus();
+        requestAnimationFrame(render);
+      });
+
+      window.addEventListener("resize", resize);
+      document.addEventListener("keydown", handleKeyDown, true);
+      document.addEventListener("keyup", handleKeyUp, true);
+      window.addEventListener("pointerdown", () => canvas.focus(), { passive: true });
+      window.addEventListener("focus", () => canvas.focus());
+      window.addEventListener("blur", () => keys.clear());
+
+      function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+
+        for (const target of [projectionCanvas, maskCanvas, colorCanvas]) {
+          target.width = PROJECTION_WIDTH;
+          target.height = PROJECTION_HEIGHT;
+        }
+        for (const context of [projectionCtx, maskCtx, colorCtx]) {
+          context.imageSmoothingEnabled = true;
+          context.imageSmoothingQuality = "high";
+        }
+        coverRect = getCoverRect(images.bg, PROJECTION_WIDTH, PROJECTION_HEIGHT);
+      }
+
+      function handleKeyDown(event) {
+        if (event.code === "Space") {
+          startEntrance();
+          event.preventDefault();
+          return;
+        }
+
+        if (!isArrowKey(event.key)) return;
+        keys.add(event.key);
+        event.preventDefault();
+      }
+
+      function handleKeyUp(event) {
+        if (!isArrowKey(event.key)) return;
+        keys.delete(event.key);
+        event.preventDefault();
+      }
+
+      function startEntrance() {
+        if (butterfly.state === "entering") return;
+        butterfly.state = "entering";
+        butterfly.enterElapsed = 0;
+        butterfly.startX = PROJECTION_WIDTH * 0.5;
+        butterfly.startY = PROJECTION_HEIGHT + 190;
+        butterfly.endX = PROJECTION_WIDTH * 0.5;
+        butterfly.endY = PROJECTION_HEIGHT * 0.58;
+        butterfly.x = butterfly.startX;
+        butterfly.y = butterfly.startY;
+        butterfly.lastX = butterfly.x;
+        butterfly.lastY = butterfly.y;
+        butterfly.opacity = 0;
+        butterfly.scale = 0.52;
+      }
+
+      function render(time) {
+        const dt = Math.min((time - previousTime) / 1000, 0.05);
+        previousTime = time;
+        const seconds = time * 0.001;
+
+        updateButterfly(dt);
+        fadeTrail(dt);
+        drawProjection(seconds);
+        drawRoom(seconds);
+
+        requestAnimationFrame(render);
+      }
+
+      function updateButterfly(dt) {
+        butterfly.lastX = butterfly.x;
+        butterfly.lastY = butterfly.y;
+
+        if (butterfly.state === "hidden") return;
+
+        if (butterfly.state === "entering") {
+          butterfly.enterElapsed += dt;
+          const t = clamp(butterfly.enterElapsed / butterfly.enterDuration, 0, 1);
+          const eased = easeOutCubic(t);
+          const lift = Math.sin(Math.PI * t) * PROJECTION_HEIGHT * 0.18;
+          butterfly.x = lerp(butterfly.startX, butterfly.endX, eased) + Math.sin(t * Math.PI * 3) * 34;
+          butterfly.y = lerp(butterfly.startY, butterfly.endY, eased) - lift;
+          butterfly.opacity = easeOutCubic(t);
+          butterfly.scale = lerp(0.52, 1, eased);
+          if (t >= 1) {
+            butterfly.state = "active";
+            butterfly.x = butterfly.endX;
+            butterfly.y = butterfly.endY;
+          }
+        } else {
+          let dx = 0;
+          let dy = 0;
+          if (keys.has("ArrowLeft")) dx -= 1;
+          if (keys.has("ArrowRight")) dx += 1;
+          if (keys.has("ArrowUp")) dy -= 1;
+          if (keys.has("ArrowDown")) dy += 1;
+          if (dx || dy) {
+            const length = Math.hypot(dx, dy);
+            const speed = Math.min(PROJECTION_WIDTH, PROJECTION_HEIGHT) * 0.46;
+            butterfly.x = clamp(butterfly.x + (dx / length) * speed * dt, 60, PROJECTION_WIDTH - 60);
+            butterfly.y = clamp(butterfly.y + (dy / length) * speed * dt, 70, PROJECTION_HEIGHT - 70);
+          }
+        }
+
+        const mx = butterfly.x - butterfly.lastX;
+        const my = butterfly.y - butterfly.lastY;
+        if (Math.hypot(mx, my) > 0.2) {
+          butterfly.angle = Math.atan2(my, mx) * 180 / Math.PI;
+          revealTrail();
+        }
+      }
+
+      function fadeTrail(dt) {
+        maskCtx.save();
+        maskCtx.globalCompositeOperation = "destination-out";
+        maskCtx.fillStyle = `rgba(0, 0, 0, ${1 - Math.exp(-dt / 0.7)})`;
+        maskCtx.fillRect(0, 0, PROJECTION_WIDTH, PROJECTION_HEIGHT);
+        maskCtx.restore();
+      }
+
+      function revealTrail() {
+        const distance = Math.hypot(butterfly.x - butterfly.lastX, butterfly.y - butterfly.lastY);
+        const steps = Math.max(1, Math.ceil(distance / 16));
+        for (let i = 0; i <= steps; i += 1) {
+          const t = i / steps;
+          const x = lerp(butterfly.lastX, butterfly.x, t);
+          const y = lerp(butterfly.lastY, butterfly.y, t);
+          drawSoftMask(x, y, clamp(Math.min(PROJECTION_WIDTH, PROJECTION_HEIGHT) * 0.092, 78, 172), 1);
+        }
+      }
+
+      function drawSoftMask(x, y, radius, strength) {
+        const gradient = maskCtx.createRadialGradient(x, y, radius * 0.18, x, y, radius);
+        gradient.addColorStop(0, `rgba(255, 255, 255, ${strength})`);
+        gradient.addColorStop(0.34, `rgba(255, 255, 255, ${strength * 0.66})`);
+        gradient.addColorStop(0.72, `rgba(255, 255, 255, ${strength * 0.22})`);
+        gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
+        maskCtx.save();
+        maskCtx.fillStyle = gradient;
+        maskCtx.beginPath();
+        maskCtx.arc(x, y, radius, 0, Math.PI * 2);
+        maskCtx.fill();
+        maskCtx.restore();
+      }
+
+      function drawProjection(seconds) {
+        projectionCtx.clearRect(0, 0, PROJECTION_WIDTH, PROJECTION_HEIGHT);
+        projectionCtx.drawImage(images.bg, coverRect.x, coverRect.y, coverRect.w, coverRect.h);
+
+        colorCtx.clearRect(0, 0, PROJECTION_WIDTH, PROJECTION_HEIGHT);
+        colorCtx.filter = "saturate(1.95) contrast(1.24) brightness(1.03)";
+        colorCtx.drawImage(images.color, coverRect.x, coverRect.y, coverRect.w, coverRect.h);
+        colorCtx.filter = "none";
+        colorCtx.globalCompositeOperation = "destination-in";
+        colorCtx.drawImage(maskCanvas, 0, 0);
+        colorCtx.globalCompositeOperation = "source-over";
+        projectionCtx.drawImage(colorCanvas, 0, 0);
+
+        drawProjectionBreath(seconds);
+        drawButterfly(seconds);
+      }
+
+      function drawProjectionBreath(seconds) {
+        projectionCtx.save();
+        projectionCtx.globalCompositeOperation = "screen";
+        const glow = projectionCtx.createRadialGradient(
+          PROJECTION_WIDTH * 0.5,
+          PROJECTION_HEIGHT * 0.5,
+          PROJECTION_WIDTH * 0.05,
+          PROJECTION_WIDTH * 0.5,
+          PROJECTION_HEIGHT * 0.52,
+          PROJECTION_WIDTH * 0.72
+        );
+        const alpha = 0.04 + Math.sin(seconds * 0.5) * 0.015;
+        glow.addColorStop(0, `rgba(255, 248, 215, ${alpha})`);
+        glow.addColorStop(1, "rgba(255, 248, 215, 0)");
+        projectionCtx.fillStyle = glow;
+        projectionCtx.fillRect(0, 0, PROJECTION_WIDTH, PROJECTION_HEIGHT);
+        projectionCtx.restore();
+      }
+
+      function drawButterfly(seconds) {
+        if (butterfly.opacity <= 0 || !images.butterfly) return;
+        const size = clamp(PROJECTION_WIDTH * 0.052, 76, 108) * butterfly.scale;
+        const sway = Math.sin(seconds * 6) * 5;
+        const tilt = clamp(butterfly.angle * 0.08, -12, 12);
+
+        projectionCtx.save();
+        projectionCtx.globalAlpha = butterfly.opacity;
+        projectionCtx.translate(butterfly.x, butterfly.y);
+        projectionCtx.rotate((tilt + sway) * Math.PI / 180);
+        projectionCtx.shadowColor = "rgba(102, 210, 255, 0.86)";
+        projectionCtx.shadowBlur = size * 0.32;
+        projectionCtx.drawImage(images.butterfly, -size * 0.5, -size * 0.5, size, size);
+        projectionCtx.restore();
+      }
+
+      function drawRoom(seconds) {
+        ctx.clearRect(0, 0, width, height);
+        drawRoomShell(seconds);
+        drawCurvedProjection();
+        drawFloorReflection();
+        drawVignette();
+      }
+
+      function drawRoomShell(seconds) {
+        const ceiling = ctx.createLinearGradient(0, 0, 0, height * 0.38);
+        ceiling.addColorStop(0, "#010101");
+        ceiling.addColorStop(0.72, "#030303");
+        ceiling.addColorStop(1, "rgba(3, 3, 3, 0)");
+        ctx.fillStyle = ceiling;
+        ctx.fillRect(0, 0, width, height * 0.45);
+
+        const floor = ctx.createLinearGradient(0, height * 0.58, 0, height);
+        floor.addColorStop(0, "rgba(5, 5, 5, 0)");
+        floor.addColorStop(0.3, "#050505");
+        floor.addColorStop(1, "#010101");
+        ctx.fillStyle = floor;
+        ctx.fillRect(0, height * 0.52, width, height * 0.48);
+
+        ctx.save();
+        ctx.globalAlpha = 0.34;
+        ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
+        [-0.46, 0, 0.46].forEach((offset) => {
+          const x = width * (0.5 + offset);
+          const y = height * 0.11 + Math.sin(seconds + offset * 4) * 1.2;
+          ctx.beginPath();
+          ctx.ellipse(x, y, width * 0.008, height * 0.0022, 0, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.restore();
+      }
+
+      function drawCurvedProjection() {
+        const left = -width * 0.05;
+        const right = width * 1.05;
+        const slices = 360;
+        const source = { x: 0, y: 0, w: PROJECTION_WIDTH, h: PROJECTION_HEIGHT };
+        for (let i = 0; i < slices; i += 1) {
+          const t0 = i / slices;
+          const t1 = (i + 1) / slices;
+          const topA = getScreenPoint(left, right, t0, 0);
+          const topB = getScreenPoint(left, right, t1, 0);
+          const bottomA = getScreenPoint(left, right, t0, 1);
+          const bottomB = getScreenPoint(left, right, t1, 1);
+          const sx = source.w * t0;
+          const sw = source.w * (t1 - t0);
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(topA.x, topA.y);
+          ctx.lineTo(topB.x, topB.y);
+          ctx.lineTo(bottomB.x, bottomB.y);
+          ctx.lineTo(bottomA.x, bottomA.y);
+          ctx.closePath();
+          ctx.clip();
+          const a = (topB.x - topA.x) / sw;
+          const b = (topB.y - topA.y) / sw;
+          const c = (bottomA.x - topA.x) / source.h;
+          const d = (bottomA.y - topA.y) / source.h;
+          ctx.setTransform(a * dpr, b * dpr, c * dpr, d * dpr, topA.x * dpr, topA.y * dpr);
+          ctx.drawImage(projectionCanvas, sx, 0, sw, source.h, 0, 0, sw, source.h);
+          ctx.restore();
+        }
+      }
+
+      function getScreenPoint(left, right, t, v) {
+        const edge = Math.abs(t - 0.5) * 2;
+        const top = height * 0.34 - Math.pow(edge, 1.58) * height * 0.18;
+        const bottom = height * 0.66 + Math.pow(edge, 1.42) * height * 0.11;
+        return {
+          x: lerp(left, right, t),
+          y: lerp(top, bottom, v)
+        };
+      }
+
+      function drawFloorReflection() {
+        ctx.save();
+        ctx.globalAlpha = 0.18;
+        ctx.translate(width * 0.5, height * 1.16);
+        ctx.scale(1, -0.34);
+        ctx.drawImage(projectionCanvas, -width * 0.36, height * 0.3, width * 0.72, height * 0.33);
+        ctx.restore();
+      }
+
+      function drawVignette() {
+        const vignette = ctx.createRadialGradient(
+          width * 0.5,
+          height * 0.48,
+          Math.min(width, height) * 0.24,
+          width * 0.5,
+          height * 0.5,
+          Math.max(width, height) * 0.72
+        );
+        vignette.addColorStop(0, "rgba(0, 0, 0, 0)");
+        vignette.addColorStop(0.72, "rgba(0, 0, 0, 0.1)");
+        vignette.addColorStop(1, "rgba(0, 0, 0, 0.58)");
+        ctx.fillStyle = vignette;
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      function isArrowKey(key) {
+        return key === "ArrowUp" || key === "ArrowDown" || key === "ArrowLeft" || key === "ArrowRight";
+      }
+
+      function loadImage(src) {
+        return new Promise((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => resolve(image);
+          image.onerror = reject;
+          image.src = src;
+        });
+      }
+
+      function getCoverRect(img, containerWidth, containerHeight) {
+        const imageRatio = img.naturalWidth / img.naturalHeight;
+        const containerRatio = containerWidth / containerHeight;
+        if (containerRatio > imageRatio) {
+          const w = containerWidth;
+          const h = w / imageRatio;
+          return { x: 0, y: (containerHeight - h) * 0.5, w, h };
+        }
+        const h = containerHeight;
+        const w = h * imageRatio;
+        return { x: (containerWidth - w) * 0.5, y: 0, w, h };
+      }
+
+      function lerp(a, b, t) {
+        return a + (b - a) * t;
+      }
+
+      function easeOutCubic(t) {
+        return 1 - Math.pow(1 - t, 3);
+      }
+
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+    })();
+  </script>
+</body>
+</html>
